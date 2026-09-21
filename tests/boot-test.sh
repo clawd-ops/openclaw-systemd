@@ -82,7 +82,7 @@ echo "== probes do not open PAM sessions (log noise)"
 # steps cannot land in the window and the probe's own lines cannot be missed.
 docker exec boot sh -ec '
   journalctl --sync
-  c=$(journalctl -n 0 --show-cursor -q | sed -n "s/^-- cursor: //p")
+  c=$(journalctl -n 1 --show-cursor -q -o cat | sed -n "s/^-- cursor: //p"); test -n "$c"
   openclaw-probe-live >/dev/null
   journalctl --sync
   n=$(journalctl --after-cursor="$c" -o cat | grep -c "pam_unix(runuser" || true)

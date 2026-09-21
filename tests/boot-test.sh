@@ -24,12 +24,19 @@ wait_ready() {
 
 wait_ready
 docker exec boot openclaw-probe-live
-docker exec boot oc gateway status
+status=$(docker exec boot oc gateway status)
+printf '%s\n' "$status"
+if printf '%s\n' "$status" | grep -q "Service config issue"; then
+  echo "gateway status reports a service config issue"; exit 1
+fi
 docker exec boot sh -ec '
   u=/home/openclaw/.config/systemd/user/openclaw-gateway.service
-  grep -q -- "--max-old-space-size=8192" "$u"
+  grep -q -- "--max-old-space-size=[0-9]" "$u"
   test "$(stat -c %U:%a /home/openclaw/.config/systemd/user)" = node:700
 '
+# Hosted runners have less RAM than 4x the requested heap, so the pin cannot
+# apply here; the entrypoint must say so rather than fail silently.
+docker logs boot 2>&1 | grep -q "WARNING: OPENCLAW_SYSTEMD_HEAP_MIB=8192 needs 4x"
 
 docker exec boot oc gateway stop --force
 docker exec boot openclaw-probe-live

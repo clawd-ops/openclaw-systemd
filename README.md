@@ -17,7 +17,7 @@ Images: `ghcr.io/clawd-ops/openclaw-systemd:<openclaw-version>`. The version tra
 |---|---|
 | Kubernetes env and Secrets | Written each boot to `/run/openclaw/gateway.env` (tmpfs, root 0600) and loaded by the user manager, so every user unit, including the gateway, gets them. Never written to the state volume. |
 | Keys OpenClaw persists | `gateway install` copies some provider keys into `~/.openclaw/gateway.systemd.env`, which would override a rotated Secret. Each boot, keys that Kubernetes also supplies are removed from it. Other keys are kept. |
-| Gateway heap | Set `OPENCLAW_SYSTEMD_HEAP_MIB` (>= 8192) to pin `--max-old-space-size` at install. Otherwise OpenClaw sizes it from the pod memory limit. |
+| Gateway heap | Set `OPENCLAW_SYSTEMD_HEAP_MIB` (>= 8192) to pin `--max-old-space-size` at install. It works by giving the installer a memory limit of 4x that value, so the node needs at least that much RAM; otherwise OpenClaw sizes from RAM and the entrypoint logs a warning. Unset, OpenClaw sizes it from the pod memory limit. |
 | Logs | The journal is streamed to the container's stdout, so `kubectl logs` shows systemd, bootstrap, and gateway output, including shutdown. |
 | Termination | `STOPSIGNAL SIGRTMIN+3` (systemd's halt signal; SIGTERM would make it re-execute). An idle gateway stops in well under a second. A gateway with work in flight may drain for up to 330s (OpenClaw's fixed service timeout), so set `terminationGracePeriodSeconds` to 360. |
 | `/tmp` | Not emptied at boot, since in a pod it is usually shared with other containers. |

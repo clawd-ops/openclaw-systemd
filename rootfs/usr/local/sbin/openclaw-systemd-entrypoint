@@ -27,8 +27,14 @@ mount -o remount,rw /sys/fs/cgroup
 #    it. Without it, the installer sees the pod's own limit. This only feeds
 #    the heuristic; the pod limit still applies. OpenClaw keeps an existing
 #    heap flag on later reinstalls, so the result is sticky.
+#    OpenClaw ignores a cgroup limit larger than the machine's RAM and sizes
+#    from RAM instead, so the pin needs 4x the value <= the node's memory.
 if [ -n "$OPENCLAW_SYSTEMD_HEAP_MIB" ]; then
   INSTALL_MEM="$((OPENCLAW_SYSTEMD_HEAP_MIB * 4))M"
+  NODE_MIB=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
+  if [ "$((OPENCLAW_SYSTEMD_HEAP_MIB * 4))" -gt "$NODE_MIB" ]; then
+    log "WARNING: OPENCLAW_SYSTEMD_HEAP_MIB=$OPENCLAW_SYSTEMD_HEAP_MIB needs 4x that (${INSTALL_MEM}) <= node RAM (${NODE_MIB}M); OpenClaw will size the heap from RAM instead"
+  fi
 else
   INSTALL_MEM="$(cat /sys/fs/cgroup/memory.max)"
 fi

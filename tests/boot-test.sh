@@ -70,15 +70,24 @@ logs=$(docker logs boot 2>&1)
 grep -q "WARNING: OPENCLAW_SYSTEMD_HEAP_MIB=8192 needs 4x" <<<"$logs"
 
 echo "== oc works from a systemd job (empty environment), not just exec"
-out=$(docker exec boot systemd-run --quiet --wait --pipe --collect oc gateway status 2>&1)
+# env -i guarantees nothing from this exec session leaks in: the test only
+# passes if oc reloads the boot env file itself.
+out=$(docker exec boot systemd-run --quiet --wait --pipe --collect \
+  env -i PATH=/usr/local/bin:/usr/bin:/bin oc gateway status 2>&1)
 grep -q "^Runtime: running" <<<"$out" || { printf '%s\n' "$out"; echo "oc failed inside a systemd job"; exit 1; }
 
 echo "== probes do not open PAM sessions (log noise)"
-before=$(docker logs boot 2>&1 | grep -c "pam_unix(runuser" || true)
-docker exec boot openclaw-probe-live
-sleep 5  # journal reaches docker logs asynchronously
-after=$(docker logs boot 2>&1 | grep -c "pam_unix(runuser" || true)
-test "$before" = "$after"
+# Read the journal inside the container around one probe run, flushing it
+# before taking the cursor and before reading, so late lines from earlier
+# steps cannot land in the window and the probe's own lines cannot be missed.
+docker exec boot sh -ec '
+  journalctl --sync
+  c=$(journalctl -n 0 --show-cursor -q | sed -n "s/^-- cursor: //p")
+  openclaw-probe-live >/dev/null
+  journalctl --sync
+  n=$(journalctl --after-cursor="$c" -o cat | grep -c "pam_unix(runuser" || true)
+  test "$n" = 0 || { echo "probe opened $n PAM session lines"; exit 1; }
+'
 
 echo "== native stop/start, container stays up"
 docker exec boot oc gateway stop --force

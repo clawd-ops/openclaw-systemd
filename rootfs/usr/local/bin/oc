@@ -14,12 +14,21 @@
 # session bus is unavailable". The file is written with double-quoted,
 # POSIX-sh-compatible escaping, so sourcing it is exact. Callers that cannot
 # read it (non-root) keep their own environment.
+MEMMAX=$(cat /etc/openclaw-install-memmax)
 if [ -r /run/openclaw/gateway.env ]; then
   set -a
   . /run/openclaw/gateway.env
   set +a
 fi
-exec systemd-run --quiet --scope -p MemoryMax="$(cat /etc/openclaw-install-memmax)" -- \
+# The env file is trusted operator input, but it must not steer this
+# helper's own root-side plumbing (systemd-run, runuser, env). Re-pin the
+# shell and loader environment; the CLI gets its PATH set explicitly below.
+unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT BASH_ENV ENV CDPATH
+IFS=' 	
+'
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+exec /usr/bin/systemd-run --quiet --scope -p MemoryMax="$MEMMAX" -- \
   runuser -u node --preserve-environment -- env -u OPENCLAW_HOME \
   HOME=/home/openclaw XDG_RUNTIME_DIR=/run/user/1000 \
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \

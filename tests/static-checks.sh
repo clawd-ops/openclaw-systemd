@@ -49,6 +49,7 @@ env -i /bin/sh -ec '
 '
 grep -q '^  \. /run/openclaw/gateway.env$' /usr/local/bin/oc
 ! grep -q runuser /usr/local/bin/openclaw-probe-live
+grep -q '^unset LD_PRELOAD' /usr/local/bin/oc
 
 systemd --version | head -1
 echo "static checks passed"

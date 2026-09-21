@@ -10,8 +10,14 @@
 s=$(timeout 5 systemctl is-system-running 2>/dev/null)
 case "$s" in running|degraded|starting|initializing) ;; *) echo "system=$s"; exit 1 ;; esac
 [ "$(systemctl is-active user@1000.service)" = "active" ] || { echo "user@1000 not active"; exit 1; }
-g=$(runuser -u node -- env XDG_RUNTIME_DIR=/run/user/1000 \
+# setpriv, not runuser: runuser opens a PAM session, which logs two
+# "session opened/closed" lines on every probe run (every 10s per probe).
+g=$(setpriv --reuid=1000 --regid=1000 --init-groups -- env \
+    XDG_RUNTIME_DIR=/run/user/1000 \
     DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
     systemctl --user is-failed openclaw-gateway.service 2>/dev/null)
 [ "$g" = "failed" ] && { echo "gateway=failed"; exit 1; }
+# No answer at all means the user manager cannot be queried, which native
+# commands would also hit; do not report healthy.
+[ -n "$g" ] || { echo "gateway state unknown (user manager not answering)"; exit 1; }
 exit 0

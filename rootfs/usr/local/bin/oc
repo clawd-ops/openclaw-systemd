@@ -1,0 +1,12 @@
+#!/bin/sh
+# Run the OpenClaw CLI the way a local install would: as uid 1000, with the
+# account's own HOME, the user manager's bus, OPENCLAW_HOME unset, and the
+# image's CLI (not a copy on the state volume). Use it for every `openclaw`
+# command from `kubectl exec`, which lands as root. It runs inside a scope
+# carrying the install memory limit, so `oc gateway install` produces the
+# same pinned heap as first boot.
+exec systemd-run --quiet --scope -p MemoryMax="$(cat /etc/openclaw-install-memmax)" -- \
+  runuser -u node --preserve-environment -- env -u OPENCLAW_HOME \
+  HOME=/home/openclaw XDG_RUNTIME_DIR=/run/user/1000 \
+  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
+  PATH=/usr/local/bin:/usr/bin:/bin openclaw "$@"

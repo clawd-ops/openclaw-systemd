@@ -1,0 +1,29 @@
+#!/bin/sh
+# First boot installs the gateway service natively with `openclaw gateway
+# install`. Later boots find the unit on the state volume and do nothing; the
+# user manager starts it. Runs as openclaw-bootstrap.service with the
+# Kubernetes env and the install memory limit (see the entrypoint).
+set -e
+UNIT=/home/openclaw/.config/systemd/user/openclaw-gateway.service
+if [ -f "$UNIT" ]; then
+  echo "bootstrap: gateway unit already installed; the user manager starts it"
+  exit 0
+fi
+echo "bootstrap: no gateway unit yet, installing it natively"
+run() {
+  runuser -u node --preserve-environment -- env -u OPENCLAW_HOME \
+    HOME=/home/openclaw XDG_RUNTIME_DIR=/run/user/1000 \
+    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
+    PATH=/usr/local/bin:/usr/bin:/bin openclaw "$@"
+}
+# OpenClaw builds the unit's PATH from the user bin dirs that exist at install
+# time. pnpm's are created later, by the gateway itself, and would otherwise
+# make `gateway status` report the service PATH as out of date.
+install -d -o node -g node /home/openclaw/.local /home/openclaw/.local/share \
+  /home/openclaw/.local/share/pnpm /home/openclaw/.local/share/pnpm/bin
+# An empty state volume has no config at all; give it the minimum a gateway
+# needs. An existing config is never rewritten here.
+if [ ! -f /home/openclaw/.openclaw/openclaw.json ]; then
+  run config set gateway.mode local
+fi
+run gateway install --allow-unconfigured

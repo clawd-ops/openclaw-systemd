@@ -1,0 +1,75 @@
+---
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read OpenClaw version
+        id: vars
+        run: |
+          v=$(sed -n 's/^ARG OPENCLAW_VERSION=//p' Dockerfile)
+          test -n "$v"
+          echo "openclaw_version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build for testing
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: openclaw-systemd:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Static checks
+        run: docker run --rm --entrypoint sh -v "$PWD/tests:/tests:ro" openclaw-systemd:ci /tests/static-checks.sh
+
+      - name: Boot test (systemd PID 1, native gateway lifecycle)
+        run: tests/boot-test.sh openclaw-systemd:ci
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.vars.outputs.openclaw_version }}
+            type=sha,prefix=${{ steps.vars.outputs.openclaw_version }}-
+
+      - name: Push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha

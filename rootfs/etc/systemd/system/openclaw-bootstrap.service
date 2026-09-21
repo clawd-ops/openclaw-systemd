@@ -1,0 +1,16 @@
+[Unit]
+Description=OpenClaw gateway service install on first boot (idempotent)
+Requires=user@1000.service
+After=user@1000.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Install must see the same env as runtime. Without it the installer has no
+# OPENCLAW_GATEWAY_TOKEN and mints a second token into the config.
+EnvironmentFile=/run/openclaw/gateway.env
+ExecStart=/usr/local/libexec/openclaw-systemd/bootstrap
+StandardOutput=journal
+
+[Install]
+WantedBy=multi-user.target

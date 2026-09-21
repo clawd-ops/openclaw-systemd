@@ -1,0 +1,91 @@
+#!/bin/sh
+# Runs as root with the container's capabilities, BEFORE systemd. Every step
+# is idempotent and runs on every container start, so it re-applies after
+# kubelet's fsGroup pass and refreshes the Kubernetes env on each boot.
+set -e
+log() { echo "openclaw-systemd: $*"; }
+
+HOME_DIR=/home/openclaw
+STATE_DIR=$HOME_DIR/.openclaw
+
+# 1. /run is usually an emptyDir, so it survives container restarts and would
+#    carry the previous systemd's state into a fresh boot. A real machine
+#    starts with /run empty; do the same. The /run/lock mount point is kept.
+find /run -mindepth 1 -maxdepth 1 ! -name lock -exec rm -rf {} + 2>/dev/null || true
+find /run/lock -mindepth 1 -exec rm -rf {} + 2>/dev/null || true
+
+# 2. systemd needs a writable cgroup tree. This is the ONLY use of
+#    CAP_SYS_ADMIN; it is removed from the bounding set before exec below.
+mount -o remount,rw /sys/fs/cgroup
+
+# 3. Pin the gateway heap. OpenClaw sizes --max-old-space-size once, at
+#    install, from the installing process's cgroup memory limit:
+#      min(max(8192, limit/4), max(2048, limit/2), 0.75 * limit)
+#    Inside systemd that limit is otherwise "max", so it falls back to HOST
+#    RAM. With OPENCLAW_SYSTEMD_HEAP_MIB set (>= 8192), the installer runs
+#    with MemoryMax = 4x that value, which makes the formula return exactly
+#    it. Without it, the installer sees the pod's own limit. This only feeds
+#    the heuristic; the pod limit still applies. OpenClaw keeps an existing
+#    heap flag on later reinstalls, so the result is sticky.
+if [ -n "$OPENCLAW_SYSTEMD_HEAP_MIB" ]; then
+  INSTALL_MEM="$((OPENCLAW_SYSTEMD_HEAP_MIB * 4))M"
+else
+  INSTALL_MEM="$(cat /sys/fs/cgroup/memory.max)"
+fi
+mkdir -p /etc/systemd/system/openclaw-bootstrap.service.d
+printf '[Service]\nMemoryMax=%s\n' "$INSTALL_MEM" \
+  > /etc/systemd/system/openclaw-bootstrap.service.d/10-memory.conf
+# The `oc` operator helper applies the same limit to manual reinstalls.
+printf '%s\n' "$INSTALL_MEM" > /etc/openclaw-install-memmax
+
+# 4. Deployment-specific units (for example a helper daemon) can be mounted
+#    into /etc/openclaw-systemd/units/ and are installed and enabled here.
+if [ -d /etc/openclaw-systemd/units ]; then
+  for u in /etc/openclaw-systemd/units/*.service; do
+    [ -f "$u" ] || continue
+    n=$(basename "$u")
+    install -m 0644 "$u" "/etc/systemd/system/$n"
+    ln -sf "/etc/systemd/system/$n" "/etc/systemd/system/multi-user.target.wants/$n"
+    log "enabled extra unit $n"
+  done
+fi
+
+# 5. The user unit directory must not be group- or world-writable, but
+#    fsGroup makes the home 2775. Only the unit directory chain is fixed; the
+#    home root is left exactly as kubelet sets it.
+install -d -o node -g node -m 0755 $HOME_DIR/.config $HOME_DIR/.config/systemd
+install -d -o node -g node -m 0700 $HOME_DIR/.config/systemd/user
+
+# 6. `openclaw gateway install` copies some provider keys from the installing
+#    shell into $STATE_DIR/gateway.systemd.env on the state volume. That file
+#    overrides the Kubernetes value and `install --force` does not refresh it,
+#    so a rotated Secret would be silently ignored. Every key Kubernetes also
+#    supplies is stripped here; keys Kubernetes does NOT supply are durable
+#    settings made through OpenClaw and are kept. A file that is not plain
+#    KEY=value lines is left untouched rather than risk corrupting it.
+node /usr/local/libexec/openclaw-systemd/prune-service-env.mjs "$STATE_DIR/gateway.systemd.env"
+
+# 7. Kubernetes env (including envFrom Secrets) for the user manager and
+#    therefore the gateway. On tmpfs, never on the state volume, refreshed
+#    every boot. root:root 0600 because PID 1 reads it; uid 1000 gets the
+#    values only through the user manager's environment.
+install -d -o root -g root -m 0700 /run/openclaw
+node /usr/local/libexec/openclaw-systemd/write-env-file.mjs /run/openclaw/gateway.env
+log "gateway env: $(grep -c '^[A-Za-z_]' /run/openclaw/gateway.env) vars -> /run/openclaw/gateway.env"
+
+# 8. Logging bridge. systemd reopens its stdio at startup, which drops the
+#    container's stdout, so without this nothing after exec reaches
+#    `kubectl logs`. This reader keeps the original stdout and drains a FIFO
+#    that k8s-log.service writes the journal into. It is reparented to PID 1
+#    on exec and reopens the FIFO after each EOF.
+rm -f /run/k8s-stdout && mkfifo -m 0600 /run/k8s-stdout
+( while :; do cat /run/k8s-stdout; done ) &
+
+# 9. Drop to the measured minimal runtime capability set and become systemd.
+#    DAC_OVERRIDE: user@.service uses Delegate=yes, so its cgroup is chowned
+#    to uid 1000 and PID 1 cannot re-attach it on a user manager restart
+#    without it. KILL: without it, stopping the user manager leaks processes.
+export container=docker
+log "exec systemd (caps: chown dac_override fowner kill setgid setpcap setuid)"
+exec setpriv --bounding-set=-all,+chown,+dac_override,+fowner,+kill,+setgid,+setpcap,+setuid \
+  -- /lib/systemd/systemd --log-target=journal

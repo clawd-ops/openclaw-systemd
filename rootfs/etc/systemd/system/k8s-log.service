@@ -1,0 +1,19 @@
+# Follows the whole journal (PID 1, bootstrap, the gateway) into the FIFO the
+# entrypoint drains to the container's stdout, i.e. `kubectl logs`.
+# DefaultDependencies=no + IgnoreOnIsolate=yes keep it running through halt;
+# as a normal unit it was the FIRST unit stopped, so no shutdown line ever
+# reached `kubectl logs`.
+[Unit]
+Description=Forward the journal to the container's stdout
+DefaultDependencies=no
+IgnoreOnIsolate=yes
+After=systemd-journald.service
+
+[Service]
+ExecStart=/bin/journalctl -f -n all -o short-iso --no-hostname
+StandardOutput=file:/run/k8s-stdout
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

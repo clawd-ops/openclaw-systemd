@@ -1,0 +1,17 @@
+#!/bin/sh
+# Liveness: fail only for states that a container restart fixes.
+# - PID 1 unreachable or shutting down.
+# - The uid 1000 user manager not running: the gateway can't be managed and
+#   will never read as "failed".
+# - The gateway unit "failed": it crashed past systemd's restart limit.
+# An intentionally stopped gateway ("inactive") PASSES, so `openclaw gateway
+# stop` opens a maintenance window instead of a restart. "degraded" passes
+# too: an unrelated failed unit must not cause a restart loop.
+s=$(timeout 5 systemctl is-system-running 2>/dev/null)
+case "$s" in running|degraded|starting|initializing) ;; *) echo "system=$s"; exit 1 ;; esac
+[ "$(systemctl is-active user@1000.service)" = "active" ] || { echo "user@1000 not active"; exit 1; }
+g=$(runuser -u node -- env XDG_RUNTIME_DIR=/run/user/1000 \
+    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
+    systemctl --user is-failed openclaw-gateway.service 2>/dev/null)
+[ "$g" = "failed" ] && { echo "gateway=failed"; exit 1; }
+exit 0

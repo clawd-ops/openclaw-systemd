@@ -5,6 +5,20 @@
 # command from `kubectl exec`, which lands as root. It runs inside a scope
 # carrying the install memory limit, so `oc gateway install` produces the
 # same pinned heap as first boot.
+#
+# The Kubernetes env (config values and Secrets the OpenClaw config refers
+# to) is loaded from the boot-time env file, so `oc` behaves the same from
+# `kubectl exec` (which inherits the container env) and from a systemd job
+# or other context that starts with an empty environment. Without it,
+# OpenClaw cannot resolve its config and fails, e.g. "The systemd user
+# session bus is unavailable". The file is written with double-quoted,
+# POSIX-sh-compatible escaping, so sourcing it is exact. Callers that cannot
+# read it (non-root) keep their own environment.
+if [ -r /run/openclaw/gateway.env ]; then
+  set -a
+  . /run/openclaw/gateway.env
+  set +a
+fi
 exec systemd-run --quiet --scope -p MemoryMax="$(cat /etc/openclaw-install-memmax)" -- \
   runuser -u node --preserve-environment -- env -u OPENCLAW_HOME \
   HOME=/home/openclaw XDG_RUNTIME_DIR=/run/user/1000 \

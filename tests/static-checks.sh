@@ -35,5 +35,20 @@ printf 'OWNED=old\n' > /tmp/o
 OWNED=new /usr/local/bin/node /usr/local/libexec/openclaw-systemd/prune-service-env.mjs /tmp/o
 test ! -e /tmp/o
 
+# The env file must round-trip exactly when sourced by POSIX sh, which is how
+# `oc` loads it.
+env -i PATH=/usr/bin:/bin QUOTED='a"b$c\d`e' MULTI="line1${nl}line2" SPACED='x  y' \
+  /usr/local/bin/node /usr/local/libexec/openclaw-systemd/write-env-file.mjs /tmp/rt
+env -i /bin/sh -ec '
+  set -a; . /tmp/rt; set +a
+  nl="
+"
+  test "$QUOTED" = '"'"'a"b$c\d`e'"'"'
+  test "$MULTI" = "line1${nl}line2"
+  test "$SPACED" = "x  y"
+'
+grep -q '^  \. /run/openclaw/gateway.env$' /usr/local/bin/oc
+! grep -q runuser /usr/local/bin/openclaw-probe-live
+
 systemd --version | head -1
 echo "static checks passed"

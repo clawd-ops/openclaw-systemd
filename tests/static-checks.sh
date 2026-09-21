@@ -24,9 +24,13 @@ test "$(stat -c %a /tmp/e)" = 600
 printf 'OWNED=old\nKEEP=1\n' > /tmp/s
 OWNED=new /usr/local/bin/node /usr/local/libexec/openclaw-systemd/prune-service-env.mjs /tmp/s
 test "$(cat /tmp/s)" = "KEEP=1"
+printf 'OWNED=old\nKEEP=1\n' > /tmp/w && chmod 644 /tmp/w
+OWNED=new /usr/local/bin/node /usr/local/libexec/openclaw-systemd/prune-service-env.mjs /tmp/w
+test "$(stat -c %a /tmp/w)" = 600
 printf 'OWNED="multi\nline"\n' > /tmp/m
 OWNED=new /usr/local/bin/node /usr/local/libexec/openclaw-systemd/prune-service-env.mjs /tmp/m
 grep -q multi /tmp/m
+OWNED=new /usr/local/bin/node /usr/local/libexec/openclaw-systemd/prune-service-env.mjs /tmp/m | grep -q "WARNING: it overrides Kubernetes-supplied OWNED"
 printf 'OWNED=old\n' > /tmp/o
 OWNED=new /usr/local/bin/node /usr/local/libexec/openclaw-systemd/prune-service-env.mjs /tmp/o
 test ! -e /tmp/o

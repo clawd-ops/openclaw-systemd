@@ -3,7 +3,7 @@
 // value (refreshed each boot) wins. Other keys are kept. The file is only
 // rewritten if every non-blank, non-comment line is a single-line KEY=value;
 // anything else (for example a quoted multi-line value) is left untouched.
-import { existsSync, readFileSync, writeFileSync, rmSync, chownSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, rmSync, chownSync, chmodSync } from "node:fs";
 
 const file = process.argv[2];
 if (!file || !existsSync(file)) process.exit(0);
@@ -24,7 +24,15 @@ const simple = lines.every((l) => {
   return !v.endsWith("\\");
 });
 if (!simple) {
+  // Not safe to rewrite. Still name any Kubernetes-owned keys it contains,
+  // since those now shadow the Kubernetes value (e.g. a rotated Secret).
+  const shadowing = lines
+    .map((l) => assignment.exec(l)?.[1])
+    .filter((k) => k && Object.hasOwn(process.env, k));
   console.log(`openclaw-systemd: ${file} is not plain KEY=value lines; left unchanged`);
+  if (shadowing.length > 0) {
+    console.log(`openclaw-systemd: WARNING: it overrides Kubernetes-supplied ${shadowing.join(" ")}; remove those lines by hand`);
+  }
   process.exit(0);
 }
 
@@ -38,7 +46,9 @@ for (const l of lines) {
 if (dropped.length === 0) process.exit(0);
 
 if (kept.some((l) => assignment.test(l))) {
-  writeFileSync(file, kept.join("\n"), { mode: 0o600 });
+  writeFileSync(file, kept.join("\n"));
+  // writeFileSync's mode only applies on create; enforce it on rewrite too.
+  chmodSync(file, 0o600);
   chownSync(file, 1000, 1000);
 } else {
   rmSync(file);

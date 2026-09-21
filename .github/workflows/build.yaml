@@ -48,7 +48,7 @@ jobs:
         run: tests/boot-test.sh openclaw-systemd:ci
 
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -65,7 +65,7 @@ jobs:
             type=sha,prefix=${{ steps.vars.outputs.openclaw_version }}-
 
       - name: Push
-        if: github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: docker/build-push-action@v6
         with:
           context: .

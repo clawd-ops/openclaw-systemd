@@ -87,7 +87,21 @@ log "gateway env: $(grep -c '^[A-Za-z_]' /run/openclaw/gateway.env) vars -> /run
 rm -f /run/k8s-stdout && mkfifo -m 0600 /run/k8s-stdout
 ( while :; do cat /run/k8s-stdout; done ) &
 
-# 9. Drop to the measured minimal runtime capability set and become systemd.
+# 9. The deployed pod's PATH puts ~/.local/bin first (an init container
+#    writes an openclaw wrapper there so uid 1000 tracks the mounted image
+#    CLI), so `kubectl exec`'s root shell would resolve `openclaw` there too
+#    and run it as root, with none of `oc`'s environment setup. Bind-mount
+#    our own uid-aware shim over that exact path so root gets handed to `oc`
+#    while the PVC file underneath, and uid 1000's view of it, are
+#    untouched. Skip if the volume has not written it yet (a fresh volume,
+#    or a plain `docker run` outside the deployed pod).
+LOCAL_BIN_OPENCLAW=$HOME_DIR/.local/bin/openclaw
+if [ -f "$LOCAL_BIN_OPENCLAW" ] && ! mountpoint -q "$LOCAL_BIN_OPENCLAW" 2>/dev/null; then
+  mount --bind /usr/local/libexec/openclaw-systemd/local-bin-openclaw-shadow "$LOCAL_BIN_OPENCLAW"
+  log "shadowed $LOCAL_BIN_OPENCLAW for root"
+fi
+
+# 10. Drop to the measured minimal runtime capability set and become systemd.
 #    DAC_OVERRIDE: user@.service uses Delegate=yes, so its cgroup is chowned
 #    to uid 1000 and PID 1 cannot re-attach it on a user manager restart
 #    without it. KILL: without it, stopping the user manager leaks processes.

@@ -30,9 +30,16 @@ RUN for u in systemd-initctl.socket apt-daily.timer apt-daily-upgrade.timer \
 
 COPY rootfs/ /
 
+# The upstream image exposes its CLI at /usr/local/bin/openclaw (a symlink to
+# /app/openclaw.mjs); rootfs/ just replaced that with our uid-aware wrapper
+# (see that file). Re-point the real target at a libexec symlink so the
+# wrapper, and `oc`'s runuser hop, still reach the image CLI directly.
+RUN ln -sf /app/openclaw.mjs /usr/local/libexec/openclaw-systemd/openclaw-real
+
 RUN chmod 0755 /usr/local/sbin/openclaw-systemd-entrypoint \
                /usr/local/libexec/openclaw-systemd/* \
                /usr/local/bin/oc \
+               /usr/local/bin/openclaw \
                /usr/local/bin/openclaw-probe-live \
                /usr/local/bin/openclaw-probe-ready \
  && mkdir -p /etc/systemd/system/multi-user.target.wants \

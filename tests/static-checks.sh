@@ -51,5 +51,20 @@ grep -q '^  \. /run/openclaw/gateway.env$' /usr/local/bin/oc
 ! grep -q runuser /usr/local/bin/openclaw-probe-live
 grep -q '^unset LD_PRELOAD' /usr/local/bin/oc
 
+# openclaw wrapper: not a symlink (that's what it replaced), hands root to
+# `oc`, and runs the image CLI directly for anyone else via a stable
+# libexec symlink that still resolves to /app/openclaw.mjs.
+test ! -L /usr/local/bin/openclaw
+test -x /usr/local/bin/openclaw
+grep -q 'exec /usr/local/bin/oc "$@"' /usr/local/bin/openclaw
+grep -q 'exec /usr/local/libexec/openclaw-systemd/openclaw-real "$@"' /usr/local/bin/openclaw
+test "$(readlink /usr/local/libexec/openclaw-systemd/openclaw-real)" = /app/openclaw.mjs
+
+# The PVC shadow shim mirrors the same uid check, so bind-mounting it over
+# ~/.local/bin/openclaw does not change non-root behavior.
+test -x /usr/local/libexec/openclaw-systemd/local-bin-openclaw-shadow
+grep -q 'exec /usr/local/bin/oc "$@"' /usr/local/libexec/openclaw-systemd/local-bin-openclaw-shadow
+grep -q 'exec node /app/openclaw.mjs "$@"' /usr/local/libexec/openclaw-systemd/local-bin-openclaw-shadow
+
 systemd --version | head -1
 echo "static checks passed"

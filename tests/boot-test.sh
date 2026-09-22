@@ -79,8 +79,9 @@ docker exec boot sh -ec '
   test "$(awk "/^CapEff:/ {print \$2}" /proc/1/status)" = 00000000000001eb
   # The unit `openclaw gateway install` wrote must run the built gateway
   # entrypoint directly, never the openclaw wrapper or oc.
-  grep -q "/app/dist/index.js" "$u"
-  ! grep -q "openclaw-real\|/usr/local/bin/openclaw\b\|/usr/local/bin/oc\b" "$u"
+  execstart=$(grep "^ExecStart=" "$u")
+  echo "$execstart" | grep -q "/app/dist/index.js"
+  ! echo "$execstart" | grep -q "openclaw-real\|/usr/local/bin/openclaw\b\|/usr/local/bin/oc\b"
 '
 # Hosted runners have less RAM than 4x the requested heap, so the pin cannot
 # apply here; the entrypoint must say so rather than fail silently.
@@ -94,13 +95,19 @@ out=$(docker exec boot systemd-run --quiet --wait --pipe --collect \
   env -i PATH=/usr/local/bin:/usr/bin:/bin oc gateway status 2>&1)
 grep -q "^Runtime: running" <<<"$out" || { printf '%s\n' "$out"; echo "oc failed inside a systemd job"; exit 1; }
 
+check_root_openclaw_shadow() {
+  # Same PATH order the deployed pod uses (~/.local/bin first). The entrypoint
+  # must have bind-mounted our shim over the fake, exit-99 file planted before
+  # boot; if it did not, this either fails outright or exits 99.
+  docker exec boot mountpoint -q /home/openclaw/.local/bin/openclaw
+  local out
+  out=$(docker exec boot systemd-run --quiet --wait --pipe --collect \
+    env -i PATH=/home/openclaw/.local/bin:/usr/local/bin:/usr/bin:/bin openclaw gateway status 2>&1)
+  grep -q "^Runtime: running" <<<"$out" || { printf '%s\n' "$out"; echo "bare openclaw failed or ran the shadowed PVC file as root"; exit 1; }
+}
+
 echo "== bare openclaw works as root, even with the PVC ~/.local/bin shadow"
-# Same PATH order the deployed pod uses (~/.local/bin first). The entrypoint
-# must have bind-mounted our shim over the fake, exit-99 file planted before
-# boot; if it did not, this either fails outright or exits 99.
-out=$(docker exec boot systemd-run --quiet --wait --pipe --collect \
-  env -i PATH=/home/openclaw/.local/bin:/usr/local/bin:/usr/bin:/bin openclaw gateway status 2>&1)
-grep -q "^Runtime: running" <<<"$out" || { printf '%s\n' "$out"; echo "bare openclaw failed or ran the shadowed PVC file as root"; exit 1; }
+check_root_openclaw_shadow
 
 echo "== uid 1000 runs the real CLI directly, no handoff through oc"
 # Break oc first: if uid 1000's bare `openclaw` still works, it proves the
@@ -138,6 +145,17 @@ docker exec boot sh -ec '
 '
 halt
 
+echo "== bind mount never wrote through to the PVC file"
+# The shadow only shadows the path inside the container's mount namespace;
+# the fake, exit-99 file the earlier check ran against must still be exactly
+# what was planted before first boot, unowned by the mount and untouched by
+# either boot.
+docker run --rm -v "$vol:/home/openclaw" --entrypoint sh "$img" -c '
+  test "$(cat /home/openclaw/.local/bin/openclaw)" = "#!/bin/sh
+exit 99"
+  test "$(stat -c %U:%a /home/openclaw/.local/bin/openclaw)" = node:755
+'
+
 echo "== second boot (unit already on the volume, fresh /run)"
 docker start boot >/dev/null
 wait_ready
@@ -149,6 +167,8 @@ docker exec boot sh -ec '
   test "$(stat -c %U:%a "$f")" = node:600
 '
 docker exec boot openclaw-probe-live
+echo "== bind mount re-applies on a fresh /run after restart"
+check_root_openclaw_shadow
 halt
 docker rm -f boot >/dev/null
 docker volume rm -f "$vol" >/dev/null

@@ -1,0 +1,13 @@
+#!/bin/sh
+# `kubectl exec` lands as root, which cannot reach uid 1000's systemd user
+# bus, creates root-owned files under an account's home, and may not even
+# reach this file: the deployed pod's PATH puts ~/.local/bin first, so the
+# entrypoint also shadows an openclaw wrapper found there (see
+# openclaw-systemd-entrypoint) with the same uid check as this one. Root
+# hands off to `oc`, which does the environment setup and drops to uid 1000.
+# Any other user (the gateway, agents, code-server) runs the image CLI
+# directly, exactly as before this wrapper existed.
+if [ "$(id -u)" = 0 ]; then
+  exec /usr/local/bin/oc "$@"
+fi
+exec /usr/local/libexec/openclaw-systemd/openclaw-real "$@"

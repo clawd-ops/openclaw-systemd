@@ -13,6 +13,20 @@ docker volume rm -f "$vol" >/dev/null 2>&1 || true
 docker volume create "$vol" >/dev/null
 docker run --rm -v "$vol:/home/openclaw" --entrypoint chown "$img" 1000:1000 /home/openclaw
 
+# Plant a fake ~/.local/bin/openclaw on the volume before boot, the way the
+# deployed pod's init container would. Exiting 99 makes it obvious if
+# anything (root's bare `openclaw`, in particular) ever actually runs it
+# instead of being shadowed by the entrypoint.
+docker run --rm -v "$vol:/home/openclaw" --entrypoint sh "$img" -c '
+  mkdir -p /home/openclaw/.local/bin
+  cat > /home/openclaw/.local/bin/openclaw <<"EOF"
+#!/bin/sh
+exit 99
+EOF
+  chmod +x /home/openclaw/.local/bin/openclaw
+  chown -R 1000:1000 /home/openclaw
+'
+
 # AppArmor is disabled only because Docker's default profile forbids the
 # cgroup remount; Kubernetes on the target cluster runs without AppArmor.
 docker run -d --name boot \
@@ -63,6 +77,10 @@ docker exec boot sh -ec '
   test "$(stat -c %U:%a /home/openclaw/.config/systemd/user)" = node:700
   # PID 1 must hold exactly the 7 runtime caps (no SYS_ADMIN).
   test "$(awk "/^CapEff:/ {print \$2}" /proc/1/status)" = 00000000000001eb
+  # The unit `openclaw gateway install` wrote must run the built gateway
+  # entrypoint directly, never the openclaw wrapper or oc.
+  grep -q "/app/dist/index.js" "$u"
+  ! grep -q "openclaw-real\|/usr/local/bin/openclaw\b\|/usr/local/bin/oc\b" "$u"
 '
 # Hosted runners have less RAM than 4x the requested heap, so the pin cannot
 # apply here; the entrypoint must say so rather than fail silently.
@@ -75,6 +93,22 @@ echo "== oc works from a systemd job (empty environment), not just exec"
 out=$(docker exec boot systemd-run --quiet --wait --pipe --collect \
   env -i PATH=/usr/local/bin:/usr/bin:/bin oc gateway status 2>&1)
 grep -q "^Runtime: running" <<<"$out" || { printf '%s\n' "$out"; echo "oc failed inside a systemd job"; exit 1; }
+
+echo "== bare openclaw works as root, even with the PVC ~/.local/bin shadow"
+# Same PATH order the deployed pod uses (~/.local/bin first). The entrypoint
+# must have bind-mounted our shim over the fake, exit-99 file planted before
+# boot; if it did not, this either fails outright or exits 99.
+out=$(docker exec boot systemd-run --quiet --wait --pipe --collect \
+  env -i PATH=/home/openclaw/.local/bin:/usr/local/bin:/usr/bin:/bin openclaw gateway status 2>&1)
+grep -q "^Runtime: running" <<<"$out" || { printf '%s\n' "$out"; echo "bare openclaw failed or ran the shadowed PVC file as root"; exit 1; }
+
+echo "== uid 1000 runs the real CLI directly, no handoff through oc"
+# Break oc first: if uid 1000's bare `openclaw` still works, it proves the
+# wrapper's non-root branch never called oc.
+docker exec boot chmod 000 /usr/local/bin/oc
+out=$(docker exec boot setpriv --reuid=1000 --regid=1000 --init-groups openclaw --version 2>&1) && rc=0 || rc=$?
+docker exec boot chmod 0755 /usr/local/bin/oc
+{ test "$rc" = 0 && [ -n "$out" ]; } || { printf '%s\n' "$out"; echo "uid 1000 openclaw --version failed"; exit 1; }
 
 echo "== probes do not open PAM sessions (log noise)"
 # Read the journal inside the container around one probe run, flushing it

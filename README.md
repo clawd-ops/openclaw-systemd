@@ -35,13 +35,15 @@ Images: `ghcr.io/clawd-ops/openclaw-systemd:<openclaw-version>`. The version tra
 
 ## Operating
 
-Use `oc` instead of `openclaw` from `kubectl exec` (which lands as root). It runs the CLI as uid 1000 with the right environment, e.g.:
+The command is just `openclaw`, from `kubectl exec` or anywhere else in the container:
 
 ```sh
-kubectl exec -it <pod> -c app -- oc gateway stop
-kubectl exec -it <pod> -c app -- oc doctor --fix
-kubectl exec -it <pod> -c app -- oc gateway start
+kubectl exec -it <pod> -c app -- openclaw gateway stop
+kubectl exec -it <pod> -c app -- openclaw doctor --fix
+kubectl exec -it <pod> -c app -- openclaw gateway start
 ```
+
+`kubectl exec` lands as root, which can't reach uid 1000's systemd user bus and would otherwise create root-owned files under the account's home. `/usr/local/bin/openclaw` is a small wrapper: as root it hands off to `oc`, which runs the CLI as uid 1000 with the right environment; as any other user it runs the image CLI directly, unchanged. The entrypoint also shadows the same handoff onto `~/.local/bin/openclaw` (an init container's copy that would otherwise win on PATH for a root shell), without touching that file on the state volume. `oc` is still there as an implementation detail, and works the same as a direct alias if you prefer to type it.
 
 Extra system units (for example a helper daemon) can be mounted as files into `/etc/openclaw-systemd/units/`; each `*.service` there is installed and enabled at boot.
 

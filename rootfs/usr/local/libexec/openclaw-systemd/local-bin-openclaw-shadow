@@ -1,0 +1,17 @@
+#!/bin/sh
+# Bind-mounted by the entrypoint over ~/.local/bin/openclaw so root's PATH
+# resolution there (the deployed pod puts ~/.local/bin first, for uid 1000's
+# sake) hands off to `oc` instead of running the image CLI directly as root.
+# The mount only shadows the path in the container's view; the PVC file
+# underneath is never written, so uid 1000 keeps whatever an init container
+# put there once the container's lifecycle ends. Anything that reaches this
+# file as uid 1000 (a fresh volume with no shadow written yet) gets the same
+# behavior as the file it replaces: run the image-mounted CLI directly.
+if [ "$(id -u)" = 0 ]; then
+  exec /usr/local/bin/oc "$@"
+fi
+if [ -f /app/openclaw.mjs ]; then
+  exec node /app/openclaw.mjs "$@"
+fi
+echo "openclaw: /app/openclaw.mjs not available in this container" >&2
+exit 127

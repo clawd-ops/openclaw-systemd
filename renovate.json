@@ -1,14 +1,28 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
+  "timezone": "America/New_York",
+  "dependencyDashboard": true,
   "customManagers": [
     {
       "customType": "regex",
       "description": "Track the upstream OpenClaw image this wraps",
-      "fileMatch": ["^Dockerfile$"],
+      "managerFilePatterns": ["/^Dockerfile$/"],
       "matchStrings": ["ARG OPENCLAW_VERSION=(?<currentValue>[0-9]{4}\\.[0-9]+\\.[0-9]+)"],
       "depNameTemplate": "ghcr.io/openclaw/openclaw",
-      "datasourceTemplate": "docker"
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Stable OpenClaw releases only. Upstream also publishes channel tags (latest, extended-stable), variant tags (-slim, -browser), per-arch tags and main-<sha> dev builds; none of those are valid values for OPENCLAW_VERSION.",
+      "matchDepNames": ["ghcr.io/openclaw/openclaw"],
+      "allowedVersions": "/^[0-9]{4}\\.[0-9]+\\.[0-9]+$/",
+      "automerge": false,
+      "labels": ["openclaw-release"],
+      "commitMessageTopic": "OpenClaw",
+      "commitMessageExtra": "to {{newVersion}}"
     }
   ]
 }

@@ -19,7 +19,9 @@
       "description": "Stable OpenClaw releases only. Upstream also publishes channel tags (latest, extended-stable), variant tags (-slim, -browser), per-arch tags and main-<sha> dev builds; none of those are valid values for OPENCLAW_VERSION.",
       "matchDepNames": ["ghcr.io/openclaw/openclaw"],
       "allowedVersions": "/^[0-9]{4}\\.[0-9]+\\.[0-9]+$/",
-      "automerge": false,
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": false,
       "labels": ["openclaw-release"],
       "commitMessageTopic": "OpenClaw",
       "commitMessageExtra": "to {{newVersion}}"

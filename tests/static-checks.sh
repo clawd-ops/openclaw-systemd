@@ -69,19 +69,36 @@ grep -q 'exec node /app/openclaw.mjs "$@"' /usr/local/libexec/openclaw-systemd/l
 # Doctor-on-upgrade: the drop-in is wired up, and repair-if-needed's decision
 # table holds. Doctor itself is simulated here; boot-test.sh runs it for real.
 r=/usr/local/libexec/openclaw-systemd/repair-if-needed
-d=/etc/systemd/user/openclaw-gateway.service.d/10-repair.conf
+d=/etc/systemd/user/service.d/10-openclaw-gateway-repair.conf
 test -x "$r"
 test -x /usr/local/libexec/openclaw-systemd/mark-healthy
-grep -qx "ExecStartPre=$r" "$d"
-grep -q '^ExecStartPost=-.*mark-healthy &' "$d"
+# Must live in the top-level service.d: OpenClaw seals its unit
+# (SERVICE_DEFINITION_SEALED [foreign-owner]) if a unit-specific drop-in is
+# owned by another account.
+test ! -e /etc/systemd/user/openclaw-gateway.service.d
+grep -qx "ExecStartPre=$r %n" "$d"
+grep -q '^ExecStartPost=-.*mark-healthy %n &' "$d"
 grep -qx 'TimeoutStartSec=15min' "$d"
 grep -q 'OPENCLAW_SERVICE_REPAIR_POLICY=external' "$r"
 grep -q 'openclaw.mjs doctor --fix --non-interactive' "$r"
 
 v=$(/usr/local/bin/node -p 'require("/app/package.json").version')
 st=/tmp/rh/.openclaw/state/openclaw-systemd
-rr() { HOME=/tmp/rh OPENCLAW_SYSTEMD_REPAIR_SIMULATE=$1 "$r"; }
+rr() { HOME=/tmp/rh OPENCLAW_SYSTEMD_REPAIR_SIMULATE=$1 "$r" openclaw-gateway.service; }
 fresh() { rm -rf /tmp/rh; mkdir -p "$st"; }
+
+# The drop-in applies to every user service: anything but the gateway is a
+# silent no-op, even with a repair forced and a failing Doctor.
+fresh; touch "$st/force-repair"
+out=$(HOME=/tmp/rh OPENCLAW_SYSTEMD_REPAIR_SIMULATE=fail "$r" dbus.service)
+test -z "$out"
+out=$(HOME=/tmp/rh OPENCLAW_SYSTEMD_REPAIR_SIMULATE=fail "$r")
+test -z "$out"
+test -e "$st/force-repair"
+test ! -e "$st/repaired-version"
+test ! -e "$st/start-pending"
+out=$(HOME=/tmp/rh /usr/local/libexec/openclaw-systemd/mark-healthy dbus.service)
+test -z "$out"
 
 # Never repaired: upgrade repair, stamp written, failed-start detection armed.
 fresh

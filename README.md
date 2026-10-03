@@ -50,7 +50,9 @@ Extra system units (for example a helper daemon) can be mounted as files into `/
 
 ## Upgrades and repair
 
-The upstream image's entrypoint runs `openclaw doctor --fix --non-interactive` before every gateway start; that is how retained state is migrated and drifted official plugins are brought to the new release after an image bump. This image replaces that entrypoint, so it runs the same command from an `ExecStartPre` drop-in (`/etc/systemd/user/openclaw-gateway.service.d/10-repair.conf`) instead, but only when needed, because a Doctor pass takes on the order of minutes even with nothing to fix:
+The upstream image's entrypoint runs `openclaw doctor --fix --non-interactive` before every gateway start; that is how retained state is migrated and drifted official plugins are brought to the new release after an image bump. This image replaces that entrypoint, so it runs the same command from an `ExecStartPre` drop-in instead, but only when needed, because a Doctor pass takes on the order of minutes even with nothing to fix.
+
+The drop-in is `/etc/systemd/user/service.d/10-openclaw-gateway-repair.conf`, the top-level drop-in directory that applies to every user service; its scripts receive the unit name and do nothing for anything but `openclaw-gateway.service`. It cannot be a unit-specific `openclaw-gateway.service.d` drop-in: OpenClaw refuses to install or change its unit (`SERVICE_DEFINITION_SEALED [foreign-owner]`) when such a drop-in belongs to another account, and exempts only top-level `service.d` files as shared.
 
 | Trigger | When | If Doctor fails |
 |---|---|---|

@@ -1,5 +1,7 @@
 #!/bin/sh
-# ExecStartPre for openclaw-gateway.service (see 10-repair.conf). Runs as the
+# ExecStartPre from /etc/systemd/user/service.d/10-openclaw-gateway-repair.conf,
+# which applies to every user service; $1 is the unit name (%n) and anything
+# other than the gateway returns immediately. For the gateway it runs as the
 # state-owning account under its user manager, so the gateway unit's own
 # environment (HOME, the boot env file) is already in place.
 #
@@ -23,6 +25,8 @@
 # Doctor runs with OPENCLAW_SERVICE_REPAIR_POLICY=external: systemd owns the
 # gateway lifecycle here, so Doctor must not stop, start or reinstall it.
 set -u
+
+[ "${1:-}" = openclaw-gateway.service ] || exit 0
 
 MAX_ATTEMPTS=2
 state=${HOME:?HOME not set}/.openclaw/state/openclaw-systemd

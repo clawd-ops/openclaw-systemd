@@ -57,9 +57,14 @@ wait_ready() {
   echo "gateway never became ready"; return 1
 }
 
-doctor_runs() {
-  docker logs boot 2>&1 | grep -c 'repair: running doctor --fix' || true
+# Count distinct log lines matching a pattern. The journal persists in the
+# container's filesystem across `docker stop`/`start`, and k8s-log replays it,
+# so a restarted test container prints the earlier boot's lines again;
+# journal lines carry a timestamp and PID, so duplicates are exact repeats.
+count_log() {
+  docker logs boot 2>&1 | grep -F -- "$1" | sort -u | wc -l | tr -d ' '
 }
+doctor_runs() { count_log 'repair: running doctor --fix'; }
 
 # mark-healthy clears the marker asynchronously after /healthz answers.
 wait_pending_cleared() {
@@ -236,14 +241,14 @@ test -n "$held" || { printf '%s\n' "$out"; echo "probe never reported the repair
 test "$(as_node systemctl --user is-failed openclaw-gateway.service)" = failed
 if docker exec boot openclaw-probe-ready; then echo "gateway answering despite a failed repair"; exit 1; fi
 docker exec boot test -f /home/openclaw/.openclaw/state/openclaw-systemd/repair-blocked
-test "$(grep -c 'repair: running doctor --fix (forced' <<<"$(docker logs boot 2>&1)")" = 1
+test "$(count_log 'repair: running doctor --fix (forced')" = 1
 # A further start (as after a pod restart) fails fast on the block: Doctor
 # does not run again, and the container is still live.
 as_node systemctl --user reset-failed openclaw-gateway.service
 as_node systemctl --user start openclaw-gateway.service && { echo "blocked gateway started"; exit 1; }
 logs=$(docker logs boot 2>&1)
 grep -q 'repair: .*not retrying automatically' <<<"$logs"
-test "$(grep -c 'repair: running doctor --fix (forced' <<<"$logs")" = 1
+test "$(count_log 'repair: running doctor --fix (forced')" = 1
 docker exec boot openclaw-probe-live
 
 echo "== retry after fixing the cause: newer force-repair, then start"
@@ -259,7 +264,7 @@ docker exec boot sh -ec '
   st=/home/openclaw/.openclaw/state/openclaw-systemd
   test ! -e $st/repair-blocked; test ! -e $st/force-repair
 '
-test "$(grep -c 'repair: running doctor --fix (forced' <<<"$(docker logs boot 2>&1)")" = 2
+test "$(count_log 'repair: running doctor --fix (forced')" = 2
 wait_pending_cleared
 docker exec boot openclaw-probe-live
 

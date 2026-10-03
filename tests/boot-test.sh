@@ -44,12 +44,27 @@ docker run -d --name boot \
   "$img" >/dev/null
 trap 'docker logs boot 2>&1 | tail -80' EXIT
 
+# First boot now runs Doctor before the gateway starts (never repaired), so
+# allow for that on top of gateway startup.
 wait_ready() {
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 120); do
     docker exec boot openclaw-probe-ready 2>/dev/null && return 0
     sleep 3
   done
   echo "gateway never became ready"; return 1
+}
+
+doctor_runs() {
+  docker logs boot 2>&1 | grep -c 'repair: running doctor --fix' || true
+}
+
+# mark-healthy clears the marker asynchronously after /healthz answers.
+wait_pending_cleared() {
+  for _ in $(seq 1 30); do
+    docker exec boot test ! -e /home/openclaw/.openclaw/state/openclaw-systemd/start-pending && return 0
+    sleep 1
+  done
+  echo "start-pending was never cleared after the gateway became healthy"; return 1
 }
 
 halt() {
@@ -66,6 +81,18 @@ halt() {
 echo "== first boot"
 wait_ready
 docker exec boot openclaw-probe-live
+
+echo "== first boot ran Doctor once (never repaired) and recorded the version"
+logs=$(docker logs boot 2>&1)
+grep -q 'repair: running doctor --fix (upgrade <never repaired> -> ' <<<"$logs"
+grep -q 'repair: doctor exited 0 ' <<<"$logs"
+test "$(doctor_runs)" = 1
+docker exec boot sh -ec '
+  st=/home/openclaw/.openclaw/state/openclaw-systemd
+  test "$(cat $st/repaired-version)" = "$(node -p "require(\"/app/package.json\").version")"
+  test "$(stat -c %U $st/repaired-version)" = node
+'
+wait_pending_cleared
 status=$(docker exec boot oc gateway status)
 printf '%s\n' "$status"
 if grep -q "Service config issue" <<<"$status"; then
@@ -136,6 +163,9 @@ docker exec boot openclaw-probe-live
 if docker exec boot openclaw-probe-ready; then echo "gateway still answering after stop"; exit 1; fi
 docker exec boot oc gateway start
 wait_ready
+# Same version, healthy last start: the restart must not run Doctor again.
+test "$(doctor_runs)" = 1
+wait_pending_cleared
 
 echo "== plant a stale Kubernetes-owned key plus an operator key, then halt"
 docker exec boot sh -ec '
@@ -156,11 +186,21 @@ exit 99"
   test "$(stat -c %U:%a /home/openclaw/.local/bin/openclaw)" = node:755
 '
 
+echo "== simulate a start that never became healthy"
+docker run --rm -v "$vol:/home/openclaw" --entrypoint sh "$img" -c '
+  echo 0 > /home/openclaw/.openclaw/state/openclaw-systemd/start-pending
+  chown 1000:1000 /home/openclaw/.openclaw/state/openclaw-systemd/start-pending
+'
+
 echo "== second boot (unit already on the volume, fresh /run)"
 docker start boot >/dev/null
 wait_ready
 logs=$(docker logs boot 2>&1)
 grep -q "bootstrap: gateway unit already installed" <<<"$logs"
+# The planted marker means the last start never got healthy: repair once.
+grep -q 'repair: running doctor --fix (previous start never became healthy (repair 1 of 2))' <<<"$logs"
+test "$(doctor_runs)" = 2
+wait_pending_cleared
 docker exec boot sh -ec '
   f=/home/openclaw/.openclaw/gateway.systemd.env
   test "$(cat "$f")" = "CI_OPERATOR_KEY=kept"

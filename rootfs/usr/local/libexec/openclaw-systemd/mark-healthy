@@ -1,0 +1,21 @@
+#!/bin/sh
+# Started detached by ExecStartPost (see 10-repair.conf). Waits for the gateway
+# to answer /healthz, then clears the start-pending marker that
+# repair-if-needed armed. A start that never gets here leaves the marker, so
+# the next start repairs first.
+set -u
+
+state=${HOME:?HOME not set}/.openclaw/state/openclaw-systemd
+port=${OPENCLAW_GATEWAY_PORT:-18789}
+deadline=$(( $(date +%s) + 600 ))
+
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  if curl -sf -m 3 -o /dev/null "http://127.0.0.1:$port/healthz"; then
+    rm -f "$state/start-pending"
+    echo "repair: gateway healthy; cleared start-pending"
+    exit 0
+  fi
+  sleep 2
+done
+echo "repair: gateway not healthy within 600s; start-pending left set, the next start repairs first"
+exit 0

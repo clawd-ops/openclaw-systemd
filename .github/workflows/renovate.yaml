@@ -1,0 +1,37 @@
+---
+name: Renovate
+
+# Self-hosted Renovate. This repository is owned by a user account rather than
+# an organization, so the hosted Renovate GitHub App is not installed here and
+# this workflow runs Renovate directly instead.
+#
+# RENOVATE_TOKEN must be a PAT, not the default GITHUB_TOKEN: pull requests
+# opened with GITHUB_TOKEN do not trigger other workflows, so Build would never
+# run on a Renovate pull request and the required check could not be satisfied.
+
+on:
+  schedule:
+    - cron: "0 5,17 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: renovate
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  renovate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Renovate
+        uses: renovatebot/github-action@6d26fcf0275dc65624cbc3d51fe78bc773f98321 # v46.3.6
+        with:
+          token: ${{ secrets.RENOVATE_TOKEN }}
+        env:
+          LOG_LEVEL: info
+          RENOVATE_PLATFORM: github
+          RENOVATE_REPOSITORIES: ${{ github.repository }}
+          RENOVATE_ONBOARDING: "false"
+          RENOVATE_REQUIRE_CONFIG: required

@@ -80,6 +80,7 @@ grep -qx "ExecStartPre=$r %n" "$d"
 grep -q '^ExecStartPost=-.*mark-healthy %n &' "$d"
 grep -qx 'TimeoutStartSec=15min' "$d"
 grep -q 'OPENCLAW_SERVICE_REPAIR_POLICY=external' "$r"
+grep -q 'openclaw-systemd/repair-blocked' /usr/local/bin/openclaw-probe-live
 grep -q 'openclaw.mjs doctor --fix --non-interactive' "$r"
 
 v=$(/usr/local/bin/node -p 'require("/app/package.json").version')
@@ -114,22 +115,50 @@ out=$(rr fail)
 test -z "$out"
 test "$(cat "$st/start-pending")" = 0
 
-# Upgrade repair failure fails closed and leaves the old stamp.
+# Upgrade repair failure fails closed, leaves the old stamp, and blocks.
 fresh; echo 2026.1.1 > "$st/repaired-version"
 if rr fail >/dev/null; then echo "failed upgrade repair must fail closed"; exit 1; fi
 test "$(cat "$st/repaired-version")" = 2026.1.1
+grep -q "^$v doctor exited 1 (upgrade 2026.1.1 -> $v)" "$st/repair-blocked"
+
+# While blocked for this version, starts fail fast without running Doctor,
+# even if Doctor would now succeed: no automatic retry loop.
+if out=$(rr ok); then echo "blocked repair must keep failing"; exit 1; fi
+echo "$out" | grep -q 'not retrying automatically'
+! echo "$out" | grep -q 'running doctor'
+test "$(cat "$st/repaired-version")" = 2026.1.1
+
+# An older force-repair does not lift the block; a newer one retries, and
+# success clears both the block and the request.
+touch -d '2000-01-01' "$st/force-repair"
+if rr ok >/dev/null; then echo "a stale force-repair must not lift the block"; exit 1; fi
+touch "$st/force-repair"; touch -d '2000-01-02' "$st/repair-blocked"
+out=$(rr ok); echo "$out" | grep -q 'running doctor --fix (forced'
+test ! -e "$st/repair-blocked"; test ! -e "$st/force-repair"
+test "$(cat "$st/repaired-version")" = "$v"
+
+# A block recorded for a different version (a newer image) is not honored.
+fresh; echo 2026.1.1 > "$st/repaired-version"; echo "2026.1.1 old failure" > "$st/repair-blocked"
+out=$(rr ok); echo "$out" | grep -q "upgrade 2026.1.1 -> $v"
+test ! -e "$st/repair-blocked"
 
 # Upgrade repair success resets the failed-start budget.
 fresh; echo 2026.1.1 > "$st/repaired-version"; echo 2 > "$st/start-pending"
 rr ok >/dev/null
 test "$(cat "$st/start-pending")" = 0
 
-# Forced repair: fails closed, and success clears the request.
+# Doctor succeeding is not enough: if the stamp cannot be written, an upgrade
+# repair still fails closed (and would otherwise rerun every start).
+fresh; mkdir "$st/repaired-version.tmp"
+if rr ok >/dev/null; then echo "unwritable stamp must fail closed"; exit 1; fi
+test -e "$st/repair-blocked"
+rmdir "$st/repaired-version.tmp"
+
+# Forced repair fails closed and keeps the request for the retry.
 fresh; echo "$v" > "$st/repaired-version"; touch "$st/force-repair"
 if rr fail >/dev/null; then echo "failed forced repair must fail closed"; exit 1; fi
 test -e "$st/force-repair"
-rr ok >/dev/null
-test ! -e "$st/force-repair"
+test -e "$st/repair-blocked"
 
 # Failed start: repairs, fails open, counts attempts, stops at the cap.
 fresh; echo "$v" > "$st/repaired-version"; echo 0 > "$st/start-pending"

@@ -5,7 +5,7 @@
 # first boot, the native gateway lifecycle, a clean halt, and a second boot
 # that reuses the installed unit and prunes a stale persisted key.
 # Usage: tests/boot-test.sh <image>
-set -euo pipefail
+set -Eeuo pipefail
 img=$1
 vol=openclaw-systemd-ci-home
 docker rm -f boot >/dev/null 2>&1 || true
@@ -42,7 +42,10 @@ docker run -d --name boot \
   -e OPENCLAW_SYSTEMD_HEAP_MIB=8192 \
   -e OPENCLAW_DISABLE_BONJOUR=1 \
   "$img" >/dev/null
-trap 'docker logs boot 2>&1 | tail -80' EXIT
+trap 'echo "boot-test: FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+# The repair trail can scroll out of the last 80 lines (Doctor is verbose),
+# so print it separately.
+trap 'docker logs boot 2>&1 | tail -80; echo "--- repair/bootstrap trail"; docker logs boot 2>&1 | grep -E "repair: |bootstrap: " || true' EXIT
 
 # First boot now runs Doctor before the gateway starts (never repaired), so
 # allow for that on top of gateway startup.
@@ -207,6 +210,59 @@ docker exec boot sh -ec '
   test "$(stat -c %U:%a "$f")" = node:600
 '
 docker exec boot openclaw-probe-live
+
+as_node() {
+  docker exec boot setpriv --reuid=1000 --regid=1000 --init-groups -- env \
+    XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "$@"
+}
+
+echo "== a fail-closed repair holds the gateway down but keeps the container live"
+# Doctor is simulated as failing via the unit's own env file, and a repair is
+# forced. The gateway must refuse to start, systemd's automatic restarts must
+# not re-run Doctor, and once the unit gives up the liveness probe must still
+# pass so Kubernetes does not restart-loop the container.
+docker exec boot sh -ec '
+  st=/home/openclaw/.openclaw/state/openclaw-systemd
+  echo OPENCLAW_SYSTEMD_REPAIR_SIMULATE=fail >> /home/openclaw/.openclaw/gateway.systemd.env
+  touch $st/force-repair; chown 1000:1000 $st/force-repair
+'
+as_node systemctl --user restart openclaw-gateway.service || true
+held=
+for _ in $(seq 1 60); do
+  out=$(docker exec boot openclaw-probe-live 2>&1) && grep -q 'held stopped by a failed repair' <<<"$out" && { held=1; break; }
+  sleep 3
+done
+test -n "$held" || { printf '%s\n' "$out"; echo "probe never reported the repair-blocked gateway as live"; exit 1; }
+test "$(as_node systemctl --user is-failed openclaw-gateway.service)" = failed
+if docker exec boot openclaw-probe-ready; then echo "gateway answering despite a failed repair"; exit 1; fi
+docker exec boot test -f /home/openclaw/.openclaw/state/openclaw-systemd/repair-blocked
+test "$(grep -c 'repair: running doctor --fix (forced' <<<"$(docker logs boot 2>&1)")" = 1
+# A further start (as after a pod restart) fails fast on the block: Doctor
+# does not run again, and the container is still live.
+as_node systemctl --user reset-failed openclaw-gateway.service
+as_node systemctl --user start openclaw-gateway.service && { echo "blocked gateway started"; exit 1; }
+logs=$(docker logs boot 2>&1)
+grep -q 'repair: .*not retrying automatically' <<<"$logs"
+test "$(grep -c 'repair: running doctor --fix (forced' <<<"$logs")" = 1
+docker exec boot openclaw-probe-live
+
+echo "== retry after fixing the cause: newer force-repair, then start"
+docker exec boot sh -ec '
+  st=/home/openclaw/.openclaw/state/openclaw-systemd
+  sed -i "/OPENCLAW_SYSTEMD_REPAIR_SIMULATE/d" /home/openclaw/.openclaw/gateway.systemd.env
+  touch $st/force-repair; chown 1000:1000 $st/force-repair
+'
+as_node systemctl --user reset-failed openclaw-gateway.service
+docker exec boot oc gateway start
+wait_ready
+docker exec boot sh -ec '
+  st=/home/openclaw/.openclaw/state/openclaw-systemd
+  test ! -e $st/repair-blocked; test ! -e $st/force-repair
+'
+test "$(grep -c 'repair: running doctor --fix (forced' <<<"$(docker logs boot 2>&1)")" = 2
+wait_pending_cleared
+docker exec boot openclaw-probe-live
+
 echo "== bind mount re-applies on a fresh /run after restart"
 check_root_openclaw_shadow
 halt

@@ -8,15 +8,21 @@
 # Runs `openclaw doctor --fix --non-interactive`, the same repair the upstream
 # image's entrypoint runs, but only when one of these holds:
 #
+#   forced        $state/force-repair exists
 #   upgrade       the image's OpenClaw version differs from the version last
 #                 repaired successfully (or nothing has been repaired yet)
-#   forced        $state/force-repair exists
 #   failed start  the previous start never answered /healthz, so mark-healthy
 #                 never cleared $state/start-pending
 #
 # Failure policy:
-#   upgrade/forced  fail closed: exit non-zero so the gateway does not start on
-#                   unmigrated state. The container stays up for inspection.
+#   forced/upgrade  fail closed: exit non-zero so the gateway does not start on
+#                   unrepaired state, and write $state/repair-blocked. While
+#                   that names the current version, later starts (including
+#                   systemd's automatic restarts and later pod boots) fail
+#                   immediately without re-running Doctor, and
+#                   openclaw-probe-live reports the container live, so it
+#                   stays up for inspection instead of restart-looping. Touch
+#                   force-repair (newer than repair-blocked) to retry.
 #   failed start    fail open: log it and start anyway. After MAX_ATTEMPTS
 #                   repairs that did not lead to a healthy start, stop
 #                   repairing until the gateway is healthy again, so a broken
@@ -33,6 +39,7 @@ state=${HOME:?HOME not set}/.openclaw/state/openclaw-systemd
 stamp=$state/repaired-version
 pending=$state/start-pending
 force=$state/force-repair
+blocked=$state/repair-blocked
 
 log() { echo "repair: $*"; }
 
@@ -44,6 +51,17 @@ if [ -z "$current" ]; then
   exit 1
 fi
 last=$(cat "$stamp" 2>/dev/null || true)
+
+# A failed fail-closed repair for this version holds the gateway down until
+# someone asks for a retry by touching force-repair after the failure.
+if [ -e "$blocked" ]; then
+  blocked_version=$(sed -n '1s/ .*//p' "$blocked" 2>/dev/null)
+  if [ "$blocked_version" = "$current" ] && ! [ "$force" -nt "$blocked" ]; then
+    log "gateway held stopped: the last repair for $current failed ($(sed -n '1s/^[^ ]* //p' "$blocked"))."
+    log "not retrying automatically. After fixing the cause, retry with: touch $force && openclaw gateway start"
+    exit 1
+  fi
+fi
 
 attempts=0
 if [ -e "$pending" ]; then
@@ -69,15 +87,17 @@ elif [ -e "$pending" ]; then
 fi
 
 if [ -z "$reason" ]; then
-  # Fast path: nothing to do. Arm failed-start detection and get out of the way.
-  [ -e "$pending" ] || echo 0 > "$pending"
+  # Fast path: nothing to do. Arm failed-start detection and get out of the
+  # way. Losing the marker only disables failed-start detection, so a write
+  # failure is logged rather than blocking the gateway.
+  [ -e "$pending" ] || echo 0 > "$pending" || log "warning: could not arm $pending"
   exit 0
 fi
 
 if [ "$mode" = open ]; then
   # Count the attempt before running it, so a repair that hangs or is killed
   # still counts toward the cap.
-  echo $((attempts + 1)) > "$pending"
+  echo $((attempts + 1)) > "$pending" || log "warning: could not record the attempt in $pending"
 fi
 
 log "running doctor --fix ($reason)"
@@ -94,23 +114,34 @@ case "${OPENCLAW_SYSTEMD_REPAIR_SIMULATE:-}" in
 esac
 log "doctor exited $rc after $(( $(date +%s) - start ))s"
 
+fail_closed() {
+  printf '%s %s\n' "$current" "$1" > "$blocked" || log "warning: could not write $blocked"
+  log "refusing to start the gateway on unrepaired state: $1"
+  log "the container stays up. Inspect the log above, fix the cause, then: touch $force && openclaw gateway start"
+  exit 1
+}
+
 if [ "$rc" -eq 0 ]; then
-  echo "$current" > "$stamp.tmp" && mv -f "$stamp.tmp" "$stamp"
-  rm -f "$force"
-  # Arm failed-start detection for the start that follows this repair. An
-  # upgrade or forced repair starts a fresh attempt budget; a failed-start
+  if ! { echo "$current" > "$stamp.tmp" && mv -f "$stamp.tmp" "$stamp"; }; then
+    rm -f "$stamp.tmp" 2>/dev/null
+    if [ "$mode" = closed ]; then
+      fail_closed "doctor succeeded but $stamp could not be written ($reason)"
+    fi
+    log "warning: doctor succeeded but $stamp could not be written"
+  fi
+  rm -f "$force" "$blocked"
+  # Arm failed-start detection for the start that follows this repair. A
+  # forced or upgrade repair starts a fresh attempt budget; a failed-start
   # repair keeps the count it already recorded.
   if [ "$mode" = closed ] || [ ! -e "$pending" ]; then
-    echo 0 > "$pending"
+    echo 0 > "$pending" || log "warning: could not arm $pending"
   fi
   log "state repaired for $current"
   exit 0
 fi
 
 if [ "$mode" = closed ]; then
-  log "doctor failed; refusing to start the gateway on unrepaired state ($reason)."
-  log "the container stays up: inspect the log above, run 'openclaw doctor --fix' by hand, then 'openclaw gateway start'"
-  exit 1
+  fail_closed "doctor exited $rc ($reason)"
 fi
 
 log "doctor failed; starting anyway because this was a failed-start repair"

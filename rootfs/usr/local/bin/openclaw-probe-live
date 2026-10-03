@@ -6,7 +6,10 @@
 # - The gateway unit "failed": it crashed past systemd's restart limit.
 # An intentionally stopped gateway ("inactive") PASSES, so `openclaw gateway
 # stop` opens a maintenance window instead of a restart. "degraded" passes
-# too: an unrelated failed unit must not cause a restart loop.
+# too: an unrelated failed unit must not cause a restart loop. A gateway held
+# stopped by a failed fail-closed repair (repair-blocked, see
+# repair-if-needed) also passes: a container restart cannot fix that, and the
+# operator needs the container up to repair it.
 s=$(timeout 5 systemctl is-system-running 2>/dev/null)
 case "$s" in running|degraded|starting|initializing) ;; *) echo "system=$s"; exit 1 ;; esac
 [ "$(systemctl is-active user@1000.service)" = "active" ] || { echo "user@1000 not active"; exit 1; }
@@ -16,7 +19,11 @@ g=$(setpriv --reuid=1000 --regid=1000 --init-groups -- env \
     XDG_RUNTIME_DIR=/run/user/1000 \
     DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
     systemctl --user is-failed openclaw-gateway.service 2>/dev/null)
-[ "$g" = "failed" ] && { echo "gateway=failed"; exit 1; }
+if [ "$g" = "failed" ]; then
+  b=/home/openclaw/.openclaw/state/openclaw-systemd/repair-blocked
+  [ -f "$b" ] && { echo "gateway held stopped by a failed repair: $(head -c 300 "$b")"; exit 0; }
+  echo "gateway=failed"; exit 1
+fi
 # No answer at all means the user manager cannot be queried, which native
 # commands would also hit; do not report healthy.
 [ -n "$g" ] || { echo "gateway state unknown (user manager not answering)"; exit 1; }

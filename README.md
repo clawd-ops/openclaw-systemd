@@ -30,7 +30,7 @@ Images: `ghcr.io/clawd-ops/openclaw-systemd:<openclaw-version>`. The version tra
 - The state volume mounted at `/home/openclaw`.
 - `/run` and `/run/lock` as `emptyDir` with `medium: Memory`.
 - `terminationGracePeriodSeconds: 360`.
-- Probes: `openclaw-probe-live` for liveness (fails only if systemd or the user manager is unhealthy, or the gateway crashed past its restart limit; an intentionally stopped gateway passes), and `openclaw-probe-ready` (gateway answering on `127.0.0.1:18789`) for startup. Give the startup probe a window longer than a Doctor repair plus gateway startup; after an upgrade that can take several minutes. Liveness is unaffected while a repair runs, because the gateway unit is `activating`, not `failed`.
+- Probes: `openclaw-probe-live` for liveness (fails only if systemd or the user manager is unhealthy, or the gateway crashed past its restart limit; an intentionally stopped gateway passes), and `openclaw-probe-ready` (gateway answering on `127.0.0.1:18789`) for startup. The startup probe's window must exceed the drop-in's `TimeoutStartSec` (15 minutes) plus gateway startup, for example 20 minutes: a probe that gives up first kills the pod mid-repair, before the repaired version is recorded, so every boot would repeat it. Liveness is unaffected while a repair runs, because the gateway unit is `activating`, not `failed`.
 
 **Security note:** `kubectl exec` processes, including exec probes, get the container's capabilities rather than PID 1's reduced set, so an exec session runs as root with `SYS_ADMIN`. Restrict who can exec into the pod accordingly.
 
@@ -56,14 +56,23 @@ The drop-in is `/etc/systemd/user/service.d/10-openclaw-gateway-repair.conf`, th
 
 | Trigger | When | If Doctor fails |
 |---|---|---|
-| Upgrade | The image's OpenClaw version differs from the last version repaired successfully, or nothing has been repaired yet | Fail closed: the gateway does not start |
+| Upgrade | The image's OpenClaw version differs from the last version repaired successfully, or nothing has been repaired yet | Fail closed: the gateway is held stopped (see below) |
 | Forced | `~/.openclaw/state/openclaw-systemd/force-repair` exists | Fail closed |
 | Failed start | The previous start never answered `/healthz` | Fail open: start anyway. After two such repairs without a healthy start, stop repairing until the gateway is healthy again |
 
 Every other start, including `openclaw gateway restart`, skips Doctor and costs a few milliseconds. Doctor runs as the state-owning account with `OPENCLAW_SERVICE_REPAIR_POLICY=external`, since systemd owns the gateway's lifecycle here, so it repairs state without stopping, starting or reinstalling the service. Its output is in the container log, prefixed `repair:`.
 
-When a fail-closed repair stops the gateway, the container stays up. Read the log, run `openclaw doctor --fix` by hand, then `openclaw gateway start`. To force a repair on the next start, `touch ~/.openclaw/state/openclaw-systemd/force-repair`. To deliberately start without one, write the current version (`node -p 'require("/app/package.json").version'`) to `~/.openclaw/state/openclaw-systemd/repaired-version`.
+When a fail-closed repair fails, it writes `~/.openclaw/state/openclaw-systemd/repair-blocked`. While that names the current version, every later start (systemd's automatic restarts, `openclaw gateway start`, a pod restart) fails immediately without running Doctor again, and `openclaw-probe-live` reports the container live, so Kubernetes leaves it up for inspection instead of restart-looping. Readiness also passes in that state, as it does for an intentionally stopped gateway.
+
+To recover, read the `repair:` lines in the log and fix the cause, then retry. A `force-repair` newer than `repair-blocked` lifts the block:
+
+```sh
+kubectl exec -it <pod> -c app -- touch /home/openclaw/.openclaw/state/openclaw-systemd/force-repair
+kubectl exec -it <pod> -c app -- openclaw gateway start
+```
+
+If the unit has hit systemd's start limit, the start is refused until it is reset; as uid 1000, `systemctl --user reset-failed openclaw-gateway.service`. A successful repair removes both files. To force a repair at any time, touch `force-repair` the same way. To deliberately start without a repair, write the current version (`node -p 'require("/app/package.json").version'`) to `repaired-version` and remove `repair-blocked`.
 
 ## Tests
 
-CI builds the image, runs `tests/static-checks.sh` inside it, and boots it with systemd as PID 1 (`tests/boot-test.sh`): first-boot install, pinned heap, stop/start with the container staying up, and a clean halt. The static checks cover the repair decision table with Doctor simulated; the boot test runs Doctor for real on first boot and on a simulated failed start, and checks that a plain restart skips it.
+CI builds the image, runs `tests/static-checks.sh` inside it, and boots it with systemd as PID 1 (`tests/boot-test.sh`): first-boot install, pinned heap, stop/start with the container staying up, and a clean halt. The static checks cover the repair decision table with Doctor simulated; the boot test runs Doctor for real on first boot and on a simulated failed start, checks that a plain restart skips it, and checks that a failing repair holds the gateway down with the container still live, then recovers through `force-repair`.

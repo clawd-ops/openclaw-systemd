@@ -228,7 +228,8 @@ echo "== a fail-closed repair holds the gateway down but keeps the container liv
 # pass so Kubernetes does not restart-loop the container.
 docker exec boot sh -ec '
   st=/home/openclaw/.openclaw/state/openclaw-systemd
-  echo OPENCLAW_SYSTEMD_REPAIR_SIMULATE=fail >> /home/openclaw/.openclaw/gateway.systemd.env
+  # The env file is written without a trailing newline; start a fresh line.
+  printf "\nOPENCLAW_SYSTEMD_REPAIR_SIMULATE=fail\n" >> /home/openclaw/.openclaw/gateway.systemd.env
   touch $st/force-repair; chown 1000:1000 $st/force-repair
 '
 as_node systemctl --user restart openclaw-gateway.service || true

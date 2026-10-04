@@ -222,14 +222,14 @@ as_node() {
 }
 
 echo "== a fail-closed repair holds the gateway down but keeps the container live"
-# Doctor is simulated as failing via the unit's own env file, and a repair is
-# forced. The gateway must refuse to start, systemd's automatic restarts must
-# not re-run Doctor, and once the unit gives up the liveness probe must still
-# pass so Kubernetes does not restart-loop the container.
+# Doctor is simulated as failing through the user manager's environment (which
+# every unit it starts inherits), and a repair is forced. The gateway must
+# refuse to start, systemd's automatic restarts must not re-run Doctor, and
+# once the unit gives up the liveness probe must still pass so Kubernetes does
+# not restart-loop the container.
+as_node systemctl --user set-environment OPENCLAW_SYSTEMD_REPAIR_SIMULATE=fail
 docker exec boot sh -ec '
   st=/home/openclaw/.openclaw/state/openclaw-systemd
-  # The env file is written without a trailing newline; start a fresh line.
-  printf "\nOPENCLAW_SYSTEMD_REPAIR_SIMULATE=fail\n" >> /home/openclaw/.openclaw/gateway.systemd.env
   touch $st/force-repair; chown 1000:1000 $st/force-repair
 '
 as_node systemctl --user restart openclaw-gateway.service || true
@@ -253,9 +253,9 @@ test "$(count_log 'repair: running doctor --fix (forced')" = 1
 docker exec boot openclaw-probe-live
 
 echo "== retry after fixing the cause: newer force-repair, then start"
+as_node systemctl --user unset-environment OPENCLAW_SYSTEMD_REPAIR_SIMULATE
 docker exec boot sh -ec '
   st=/home/openclaw/.openclaw/state/openclaw-systemd
-  sed -i "/OPENCLAW_SYSTEMD_REPAIR_SIMULATE/d" /home/openclaw/.openclaw/gateway.systemd.env
   touch $st/force-repair; chown 1000:1000 $st/force-repair
 '
 as_node systemctl --user reset-failed openclaw-gateway.service

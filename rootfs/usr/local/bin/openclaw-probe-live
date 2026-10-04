@@ -20,8 +20,16 @@ g=$(setpriv --reuid=1000 --regid=1000 --init-groups -- env \
     DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
     systemctl --user is-failed openclaw-gateway.service 2>/dev/null)
 if [ "$g" = "failed" ]; then
+  # Honor the block only for the image's current version, the same check
+  # repair-if-needed applies, so a stale or hand-left file cannot hide an
+  # unrelated crash past the restart limit.
   b=/home/openclaw/.openclaw/state/openclaw-systemd/repair-blocked
-  [ -f "$b" ] && { echo "gateway held stopped by a failed repair: $(head -c 300 "$b")"; exit 0; }
+  if [ -f "$b" ]; then
+    v=$(/usr/local/bin/node -p 'require("/app/package.json").version' 2>/dev/null)
+    if [ -n "$v" ] && [ "$(sed -n '1s/ .*//p' "$b")" = "$v" ]; then
+      echo "gateway held stopped by a failed repair: $(head -c 300 "$b")"; exit 0
+    fi
+  fi
   echo "gateway=failed"; exit 1
 fi
 # No answer at all means the user manager cannot be queried, which native

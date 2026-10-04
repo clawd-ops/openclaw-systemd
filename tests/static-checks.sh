@@ -81,6 +81,8 @@ grep -q '^ExecStartPost=-.*mark-healthy %n &' "$d"
 grep -qx 'TimeoutStartSec=15min' "$d"
 grep -q 'OPENCLAW_SERVICE_REPAIR_POLICY=external' "$r"
 grep -q 'openclaw-systemd/repair-blocked' /usr/local/bin/openclaw-probe-live
+# ...and honors it only for the current image version.
+grep -q 'require("/app/package.json").version' /usr/local/bin/openclaw-probe-live
 grep -q 'openclaw.mjs doctor --fix --non-interactive' "$r"
 
 v=$(/usr/local/bin/node -p 'require("/app/package.json").version')

@@ -62,7 +62,7 @@ The drop-in is `/etc/systemd/user/service.d/10-openclaw-gateway-repair.conf`, th
 
 Every other start, including `openclaw gateway restart`, skips Doctor and costs a few milliseconds. Doctor runs as the state-owning account with `OPENCLAW_SERVICE_REPAIR_POLICY=external`, since systemd owns the gateway's lifecycle here, so it repairs state without stopping, starting or reinstalling the service. Its output is in the container log, prefixed `repair:`.
 
-When a fail-closed repair fails, it writes `~/.openclaw/state/openclaw-systemd/repair-blocked`. While that names the current version, every later start (systemd's automatic restarts, `openclaw gateway start`, a pod restart) fails immediately without running Doctor again, and `openclaw-probe-live` reports the container live, so Kubernetes leaves it up for inspection instead of restart-looping. Readiness also passes in that state, as it does for an intentionally stopped gateway.
+When a fail-closed repair fails, it writes `~/.openclaw/state/openclaw-systemd/repair-blocked`. While that names the current version, every later start (systemd's automatic restarts, `openclaw gateway start`, a pod restart) fails immediately without running Doctor again, and `openclaw-probe-live` reports the container live, so Kubernetes leaves it up for inspection instead of restart-looping. (`openclaw-probe-live` honors the block only while it names the image's current version.) `openclaw-probe-ready` fails in that state because the gateway is not answering; a readiness probe that runs `openclaw-probe-live` passes, as it does for an intentionally stopped gateway.
 
 To recover, read the `repair:` lines in the log and fix the cause, then retry. A `force-repair` newer than `repair-blocked` lifts the block:
 

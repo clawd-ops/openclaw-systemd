@@ -178,5 +178,81 @@ rr ok >/dev/null
 test "$(cat "$st/start-pending")" = 2
 rm -rf /tmp/rh
 
+# Requested stop vs crash. `openclaw gateway stop` is a maintenance window, so
+# the liveness probe must keep passing when that stop ended `failed` (the
+# gateway can exit non-zero while shutting down); a crash that exhausted the
+# restart limit must still fail it. Only the ExecStop hook, which systemd runs
+# for a stop request and never for a crash, records the request, keyed to the
+# unit's InvocationID so a marker from an earlier run cannot mask a later crash.
+m=/usr/local/libexec/openclaw-systemd/mark-stop-requested
+test -x "$m"
+grep -qx "ExecStop=-$m %n" "$d"
+# Scoping guards: no unit-wide exit-status rewrite, no probe loosening.
+! grep -rq 'SuccessExitStatus' /etc/systemd/user/service.d
+mst=/tmp/sr/.openclaw/state/openclaw-systemd
+rm -rf /tmp/sr; mkdir -p /tmp/sr
+out=$(HOME=/tmp/sr INVOCATION_ID=aaaa "$m" dbus.service); test -z "$out"
+test ! -e "$mst/stop-requested"
+out=$(HOME=/tmp/sr env -u INVOCATION_ID "$m" openclaw-gateway.service); test -z "$out"
+test ! -e "$mst/stop-requested"
+HOME=/tmp/sr INVOCATION_ID=0123456789abcdef0123456789abcdef "$m" openclaw-gateway.service
+test "$(cat "$mst/stop-requested")" = 0123456789abcdef0123456789abcdef
+HOME=/tmp/sr INVOCATION_ID=fedcba9876543210fedcba9876543210 "$m" openclaw-gateway.service
+test "$(cat "$mst/stop-requested")" = fedcba9876543210fedcba9876543210
+test "$(ls "$mst")" = stop-requested
+rm -rf /tmp/sr
+
+# The probe against a stubbed systemctl. Result of each case is its exit code.
+sb=/tmp/probe-stub
+probe=${PROBE_LIVE:-/usr/local/bin/openclaw-probe-live}
+pst=/tmp/probe-state; export OPENCLAW_SYSTEMD_STATE=$pst
+rm -rf "$sb" "$pst"; mkdir -p "$sb" "$pst"
+cat > "$sb/setpriv" <<'EOF'
+#!/bin/sh
+while [ "$1" != -- ]; do shift; done; shift; exec "$@"
+EOF
+cat > "$sb/systemctl" <<'EOF'
+#!/bin/sh
+case "$*" in
+  is-system-running) echo running ;;
+  "is-active user@1000.service") echo active ;;
+  "--user is-failed openclaw-gateway.service") echo "$STUB_STATE"; [ "$STUB_STATE" = failed ] ;;
+  "--user show -p InvocationID --value openclaw-gateway.service") echo "$STUB_INV" ;;
+  *) echo "unexpected systemctl $*" >&2; exit 2 ;;
+esac
+EOF
+chmod +x "$sb/setpriv" "$sb/systemctl"
+rm -f "$pst/stop-requested" "$pst/repair-blocked"
+pl() { PATH=$sb:$PATH STUB_STATE=$1 STUB_INV=${2:-} sh "$probe"; }
+want() { # want <exit> <state> [invocation]
+  rc=0; out=$(pl "$2" "${3:-}") || rc=$?
+  test "$rc" = "$1" || { echo "probe($2 ${3:-}): exit $rc, want $1: $out"; exit 1; }
+}
+inv1=11111111111111111111111111111111
+inv2=22222222222222222222222222222222
+want 0 active "$inv1"
+want 0 inactive "$inv1"
+# A crash past the restart limit, nothing ever requested: restart the pod.
+want 1 failed "$inv1"
+# Auto-restart after a crash with restarts left: unchanged from before.
+want 0 activating "$inv1"
+# Requested stop whose exit was non-zero: unit is failed, marker matches.
+echo "$inv1" > "$pst/stop-requested"
+want 0 failed "$inv1"
+# Requested stop (exit 0 -> inactive; exit 1 -> failed) then start, then a
+# crash past the limit: the marker names the earlier invocation, so it fails.
+want 1 failed "$inv2"
+# Marker present while the unit is running or retrying: no effect.
+want 0 active "$inv1"
+want 0 activating "$inv2"
+# No usable invocation ID never matches a marker.
+want 1 failed ""
+printf '\n' > "$pst/stop-requested"
+want 1 failed ""
+# A garbled marker does not match.
+echo "x$inv1" > "$pst/stop-requested"
+want 1 failed "$inv1"
+rm -rf "$sb" "$pst"
+
 systemd --version | head -1
 echo "static checks passed"

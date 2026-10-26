@@ -1,0 +1,34 @@
+#!/bin/sh
+# ExecStop from /etc/systemd/user/service.d/10-openclaw-gateway-repair.conf,
+# which applies to every user service; $1 is the unit name (%n) and anything
+# other than the gateway returns immediately.
+#
+# systemd runs ExecStop when the unit is asked to stop (`systemctl stop` or
+# restart, `openclaw gateway stop`, a halt), and also after a successfully
+# started service whose main process exited on its own (systemd.service(5)).
+# It did not run in testing when the process died on its own with a non-zero
+# status or a signal, which is the crash case; do not rely on that alone. A
+# gateway that exits non-zero while shutting down ends up `failed` either way
+# (Result=exit-code in both cases). Record this invocation's ID so
+# openclaw-probe-live can treat that failed unit as a maintenance window. An
+# ID, not a bare flag: the next start gets a new one, so an old marker can
+# never excuse a later crash and nothing has to clear it. The probe also
+# checks the unit's Result, because a restart refused by the start limit keeps
+# the old ID.
+#
+# A spontaneous clean exit (status 0) also writes the marker. That is harmless:
+# the unit ends `inactive`, which already passes, and the next invocation has a
+# new ID.
+#
+# Best effort: ExecStop is prefixed with "-", and this always exits 0.
+set -u
+
+[ "${1:-}" = openclaw-gateway.service ] || exit 0
+[ -n "${INVOCATION_ID:-}" ] || exit 0
+
+state=${HOME:?HOME not set}/.openclaw/state/openclaw-systemd
+mkdir -p "$state" \
+  && echo "$INVOCATION_ID" > "$state/stop-requested.tmp" \
+  && mv -f "$state/stop-requested.tmp" "$state/stop-requested" \
+  || echo "stop-requested: warning: could not record the stop in $state"
+exit 0

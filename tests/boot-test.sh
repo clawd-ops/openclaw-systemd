@@ -175,6 +175,115 @@ wait_ready
 test "$(doctor_runs)" = 1
 wait_pending_cleared
 
+as_node() {
+  docker exec boot setpriv --reuid=1000 --regid=1000 --init-groups -- env \
+    XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "$@"
+}
+# A runtime drop-in (under /run, so nothing lands on the volume) that tests
+# can add to and remove from the gateway unit. 20- sorts after the image's 10-
+# drop-in, so its ExecStop runs after mark-stop-requested.
+tdir=/run/user/1000/systemd/user/openclaw-gateway.service.d
+test_dropin() {
+  docker exec -i boot sh -ec "mkdir -p $tdir && cat > $tdir/20-test.conf"
+  as_node systemctl --user daemon-reload
+}
+clear_test_dropin() {
+  docker exec boot rm -rf "$tdir"
+  as_node systemctl --user daemon-reload
+}
+wait_state() { # wait_state <is-active state> ; waits for the gateway unit
+  for _ in $(seq 1 60); do
+    [ "$(as_node systemctl --user is-active openclaw-gateway.service || true)" = "$1" ] && return 0
+    sleep 1
+  done
+  echo "gateway never became $1"; return 1
+}
+recover_gateway() {
+  clear_test_dropin
+  as_node systemctl --user reset-failed openclaw-gateway.service
+  docker exec boot sh -c 'rm -f /home/openclaw/.openclaw/state/openclaw-systemd/start-pending'
+  docker exec boot oc gateway start
+  wait_ready
+  wait_pending_cleared
+  docker exec boot openclaw-probe-live
+}
+
+echo "== a requested stop that exits non-zero keeps the container live"
+# The real gateway sometimes exits 1 while stopping, which leaves the unit
+# `failed`. Force that: after the image's ExecStop has recorded the request,
+# the test's ExecStop kills the main process with SIGKILL.
+test_dropin <<'EOF'
+[Service]
+ExecStop=/bin/sh -c 'kill -KILL $MAINPID'
+EOF
+# The CLI may report the unclean exit; the state checks below are the assertion.
+docker exec boot oc gateway stop --force || true
+wait_state failed
+test "$(as_node systemctl --user show -p Result --value openclaw-gateway.service)" != success
+docker exec boot openclaw-probe-live
+# The marker names the invocation that was stopped.
+test "$(docker exec boot cat /home/openclaw/.openclaw/state/openclaw-systemd/stop-requested)" = \
+  "$(as_node systemctl --user show -p InvocationID --value openclaw-gateway.service)"
+# Starting again ends the window, and the gateway is healthy again.
+recover_gateway
+
+echo "== a crash after an earlier requested stop is not excused by the old marker"
+# The marker from the stop above is still on disk; this is a fresh invocation.
+docker exec boot test -f /home/openclaw/.openclaw/state/openclaw-systemd/stop-requested
+test_dropin <<'EOF'
+[Service]
+Restart=no
+EOF
+as_node systemctl --user kill --kill-whom=main --signal=KILL openclaw-gateway.service
+wait_state failed
+if docker exec boot openclaw-probe-live; then echo "probe passed for a crashed gateway"; exit 1; fi
+recover_gateway
+
+echo "== a restart rejected by the start limit fails the probe"
+# The stop half of the restart runs ExecStop and records the running
+# invocation; the start half is then refused (start-limit-hit) before a new
+# invocation exists, so the unit is failed with the old InvocationID and a
+# marker that still matches it. The gateway is down: the probe must fail.
+test_dropin <<'EOF'
+[Unit]
+StartLimitIntervalSec=300
+StartLimitBurst=1
+EOF
+as_node systemctl --user reset-failed openclaw-gateway.service
+# One successful start fills the budget.
+as_node systemctl --user restart openclaw-gateway.service
+wait_state active
+inv=$(as_node systemctl --user show -p InvocationID --value openclaw-gateway.service)
+as_node systemctl --user restart openclaw-gateway.service || true
+wait_state failed
+test "$(as_node systemctl --user show -p Result --value openclaw-gateway.service)" = start-limit-hit
+# Precondition that makes this the dangerous case: marker still matches.
+test "$(docker exec boot cat /home/openclaw/.openclaw/state/openclaw-systemd/stop-requested)" = "$inv"
+test "$(as_node systemctl --user show -p InvocationID --value openclaw-gateway.service)" = "$inv"
+if docker exec boot openclaw-probe-live; then echo "probe passed for a restart refused by the start limit"; exit 1; fi
+recover_gateway
+
+echo "== a failed start (hook failing) fails the probe"
+# ExecStop does not run for a start that never succeeded, so no marker is
+# written; the unit gives up after two quick retries.
+test_dropin <<'EOF'
+[Unit]
+StartLimitIntervalSec=60
+StartLimitBurst=2
+[Service]
+Restart=on-failure
+RestartSec=1
+# Empty first, to drop the image's repair hook: this test is about the limit,
+# not about Doctor.
+ExecStartPre=
+ExecStartPre=/bin/false
+EOF
+as_node systemctl --user restart openclaw-gateway.service || true
+wait_state failed
+echo "gateway result: $(as_node systemctl --user show -p Result --value openclaw-gateway.service) (informational)"
+if docker exec boot openclaw-probe-live; then echo "probe passed for a gateway past its start limit"; exit 1; fi
+recover_gateway
+
 echo "== plant a stale Kubernetes-owned key plus an operator key, then halt"
 docker exec boot sh -ec '
   f=/home/openclaw/.openclaw/gateway.systemd.env
@@ -215,11 +324,6 @@ docker exec boot sh -ec '
   test "$(stat -c %U:%a "$f")" = node:600
 '
 docker exec boot openclaw-probe-live
-
-as_node() {
-  docker exec boot setpriv --reuid=1000 --regid=1000 --init-groups -- env \
-    XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "$@"
-}
 
 echo "== a fail-closed repair holds the gateway down but keeps the container live"
 # Doctor is simulated as failing through the user manager's environment (which

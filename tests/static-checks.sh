@@ -189,7 +189,9 @@ m=/usr/local/libexec/openclaw-systemd/mark-stop-requested
 test -x "$m"
 grep -qx "ExecStop=-$m %n" "$d"
 # Scoping guards: no unit-wide exit-status rewrite, no probe loosening.
-! grep -rq 'SuccessExitStatus' /etc/systemd/user/service.d
+if grep -rq 'SuccessExitStatus' /etc/systemd/user/service.d; then
+  echo "SuccessExitStatus must not be set in the shared drop-in"; exit 1
+fi
 mst=/tmp/sr/.openclaw/state/openclaw-systemd
 rm -rf /tmp/sr; mkdir -p /tmp/sr
 out=$(HOME=/tmp/sr INVOCATION_ID=aaaa "$m" dbus.service); test -z "$out"
@@ -219,15 +221,16 @@ case "$*" in
   "is-active user@1000.service") echo active ;;
   "--user is-failed openclaw-gateway.service") echo "$STUB_STATE"; [ "$STUB_STATE" = failed ] ;;
   "--user show -p InvocationID --value openclaw-gateway.service") echo "$STUB_INV" ;;
+  "--user show -p Result --value openclaw-gateway.service") echo "${STUB_RESULT:-exit-code}" ;;
   *) echo "unexpected systemctl $*" >&2; exit 2 ;;
 esac
 EOF
 chmod +x "$sb/setpriv" "$sb/systemctl"
 rm -f "$pst/stop-requested" "$pst/repair-blocked"
-pl() { PATH=$sb:$PATH STUB_STATE=$1 STUB_INV=${2:-} sh "$probe"; }
-want() { # want <exit> <state> [invocation]
-  rc=0; out=$(pl "$2" "${3:-}") || rc=$?
-  test "$rc" = "$1" || { echo "probe($2 ${3:-}): exit $rc, want $1: $out"; exit 1; }
+pl() { PATH=$sb:$PATH STUB_STATE=$1 STUB_INV=${2:-} STUB_RESULT=${3:-exit-code} sh "$probe"; }
+want() { # want <exit> <state> [invocation] [Result]
+  rc=0; out=$(pl "$2" "${3:-}" "${4:-exit-code}") || rc=$?
+  test "$rc" = "$1" || { echo "probe($2 ${3:-} ${4:-}): exit $rc, want $1: $out"; exit 1; }
 }
 inv1=11111111111111111111111111111111
 inv2=22222222222222222222222222222222
@@ -253,6 +256,20 @@ want 1 failed ""
 # A garbled marker does not match.
 echo "x$inv1" > "$pst/stop-requested"
 want 1 failed "$inv1"
+# A restart whose start the start limit rejected: the stop recorded this
+# invocation and the unit is failed, but no new invocation was allocated, so the
+# ID still matches. The gateway is down; Result tells it apart from a stop.
+echo "$inv1" > "$pst/stop-requested"
+want 1 failed "$inv1" start-limit-hit
+# Stop-path failures (non-zero exit, signal, stop timeout) keep the window.
+want 0 failed "$inv1" exit-code
+want 0 failed "$inv1" signal
+want 0 failed "$inv1" core-dump
+want 0 failed "$inv1" timeout
+# Any other Result (failed dependency, resources, protocol) is not a stop.
+want 1 failed "$inv1" dependency
+want 1 failed "$inv1" resources
+want 1 failed "$inv1" ""
 rm -rf "$sb" "$pst"
 
 systemd --version | head -1

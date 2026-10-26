@@ -239,9 +239,33 @@ wait_state failed
 if docker exec boot openclaw-probe-live; then echo "probe passed for a crashed gateway"; exit 1; fi
 recover_gateway
 
-echo "== a crash past the start limit fails the probe"
+echo "== a restart rejected by the start limit fails the probe"
+# The stop half of the restart runs ExecStop and records the running
+# invocation; the start half is then refused (start-limit-hit) before a new
+# invocation exists, so the unit is failed with the old InvocationID and a
+# marker that still matches it. The gateway is down: the probe must fail.
+test_dropin <<'EOF'
+[Unit]
+StartLimitIntervalSec=300
+StartLimitBurst=1
+EOF
+as_node systemctl --user reset-failed openclaw-gateway.service
+# One successful start fills the budget.
+as_node systemctl --user restart openclaw-gateway.service
+wait_state active
+inv=$(as_node systemctl --user show -p InvocationID --value openclaw-gateway.service)
+as_node systemctl --user restart openclaw-gateway.service || true
+wait_state failed
+test "$(as_node systemctl --user show -p Result --value openclaw-gateway.service)" = start-limit-hit
+# Precondition that makes this the dangerous case: marker still matches.
+test "$(docker exec boot cat /home/openclaw/.openclaw/state/openclaw-systemd/stop-requested)" = "$inv"
+test "$(as_node systemctl --user show -p InvocationID --value openclaw-gateway.service)" = "$inv"
+if docker exec boot openclaw-probe-live; then echo "probe passed for a restart refused by the start limit"; exit 1; fi
+recover_gateway
+
+echo "== a failed start (hook failing) fails the probe"
 # ExecStop does not run for a start that never succeeded, so no marker is
-# written; the limit is reached after two quick retries.
+# written; the unit gives up after two quick retries.
 test_dropin <<'EOF'
 [Unit]
 StartLimitIntervalSec=60
@@ -256,7 +280,7 @@ ExecStartPre=/bin/false
 EOF
 as_node systemctl --user restart openclaw-gateway.service || true
 wait_state failed
-echo "gateway result: $(as_node systemctl --user show -p Result --value openclaw-gateway.service)"
+echo "gateway result: $(as_node systemctl --user show -p Result --value openclaw-gateway.service) (informational)"
 if docker exec boot openclaw-probe-live; then echo "probe passed for a gateway past its start limit"; exit 1; fi
 recover_gateway
 

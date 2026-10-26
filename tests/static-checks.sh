@@ -208,7 +208,7 @@ rm -rf /tmp/sr
 # The probe against a stubbed systemctl. Result of each case is its exit code.
 sb=/tmp/probe-stub
 probe=${PROBE_LIVE:-/usr/local/bin/openclaw-probe-live}
-pst=/tmp/probe-state; export OPENCLAW_SYSTEMD_STATE=$pst
+pst=/tmp/probe-state
 rm -rf "$sb" "$pst"; mkdir -p "$sb" "$pst"
 cat > "$sb/setpriv" <<'EOF'
 #!/bin/sh
@@ -227,7 +227,7 @@ esac
 EOF
 chmod +x "$sb/setpriv" "$sb/systemctl"
 rm -f "$pst/stop-requested" "$pst/repair-blocked"
-pl() { PATH=$sb:$PATH STUB_STATE=$1 STUB_INV=${2:-} STUB_RESULT=${3:-exit-code} sh "$probe"; }
+pl() { PATH=$sb:$PATH STUB_STATE=$1 STUB_INV=${2:-} STUB_RESULT=${3:-exit-code} sh "$probe" "$pst"; }
 want() { # want <exit> <state> [invocation] [Result]
   rc=0; out=$(pl "$2" "${3:-}" "${4:-exit-code}") || rc=$?
   test "$rc" = "$1" || { echo "probe($2 ${3:-} ${4:-}): exit $rc, want $1: $out"; exit 1; }
@@ -269,7 +269,14 @@ want 0 failed "$inv1" timeout
 # Any other Result (failed dependency, resources, protocol) is not a stop.
 want 1 failed "$inv1" dependency
 want 1 failed "$inv1" resources
-want 1 failed "$inv1" ""
+want 1 failed "$inv1" protocol
+# The state directory comes from the argument only: a same-named environment
+# variable must not redirect the probe to a directory holding a marker.
+alt=/tmp/probe-alt; rm -rf "$alt"; mkdir -p "$alt"; echo "$inv1" > "$alt/stop-requested"
+rm -f "$pst/stop-requested"
+rc=0; OPENCLAW_SYSTEMD_STATE=$alt PATH=$sb:$PATH STUB_STATE=failed STUB_INV=$inv1 STUB_RESULT=exit-code sh "$probe" "$pst" >/dev/null || rc=$?
+test "$rc" = 1
+rm -rf "$alt"
 rm -rf "$sb" "$pst"
 
 systemd --version | head -1

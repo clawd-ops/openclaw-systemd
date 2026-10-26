@@ -6,9 +6,10 @@
 # - The gateway unit "failed": it crashed past systemd's restart limit.
 # An intentionally stopped gateway ("inactive") PASSES, so `openclaw gateway
 # stop` opens a maintenance window instead of a restart. So does a "failed"
-# gateway whose last invocation was asked to stop (mark-stop-requested): the
-# gateway can exit non-zero while shutting down, which systemd records as
-# failed exactly like a crash. "degraded" passes too: an unrelated failed unit
+# gateway whose last invocation was asked to stop (mark-stop-requested) and
+# whose failure is a stop-path failure (see Result below): the gateway can exit
+# non-zero while shutting down, which systemd records as failed exactly like a
+# crash. "degraded" passes too: an unrelated failed unit
 # must not cause a restart loop. A gateway held
 # stopped by a failed fail-closed repair (repair-blocked, see
 # repair-if-needed) also passes: a container restart cannot fix that, and the
@@ -24,7 +25,9 @@ gw() {
     DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
     systemctl --user "$@" openclaw-gateway.service 2>/dev/null
 }
-state=${OPENCLAW_SYSTEMD_STATE:-/home/openclaw/.openclaw/state/openclaw-systemd}
+# The state directory is an argument, not an environment variable, so nothing in
+# the pod's environment can point only the probe elsewhere; only tests pass one.
+state=${1:-/home/openclaw/.openclaw/state/openclaw-systemd}
 g=$(gw is-failed)
 if [ "$g" = "failed" ]; then
   # Honor the block only for the image's current version, the same check
@@ -40,9 +43,18 @@ if [ "$g" = "failed" ]; then
   # A stop request recorded for this very invocation (a marker left by an
   # earlier run never matches a later crash). `gateway start` begins a new
   # invocation, which ends the window.
+  # A matching ID alone is not enough: a restart whose start the start limit
+  # refuses (Result=start-limit-hit), or whose start job fails before an
+  # invocation exists (Result=dependency), leaves the unit failed with the OLD
+  # invocation's ID, and the marker still matches while the gateway is down.
+  # Only the ways a stopping process itself ends count: a non-zero exit, a
+  # signal, a core dump, or a stop timeout. Anything else fails the probe.
   id=$(gw show -p InvocationID --value)
   if [ -n "$id" ] && [ "$(head -n1 "$state/stop-requested" 2>/dev/null)" = "$id" ]; then
-    echo "gateway stopped on request (exited failed)"; exit 0
+    case "$(gw show -p Result --value)" in
+      exit-code|signal|core-dump|timeout)
+        echo "gateway stopped on request (exited failed)"; exit 0 ;;
+    esac
   fi
   echo "gateway=failed"; exit 1
 fi

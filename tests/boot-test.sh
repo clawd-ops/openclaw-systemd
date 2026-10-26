@@ -249,6 +249,9 @@ StartLimitBurst=2
 [Service]
 Restart=on-failure
 RestartSec=1
+# Empty first, to drop the image's repair hook: this test is about the limit,
+# not about Doctor.
+ExecStartPre=
 ExecStartPre=/bin/false
 EOF
 as_node systemctl --user restart openclaw-gateway.service || true

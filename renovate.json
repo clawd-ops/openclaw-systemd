@@ -2,6 +2,7 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
   "timezone": "America/New_York",
+  "gitAuthor": "Rob Landry <1853884+roblandry@users.noreply.github.com>",
   "dependencyDashboard": true,
   "customManagers": [
     {
